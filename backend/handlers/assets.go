@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -11,8 +12,10 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/redis/go-redis/v9"
+	"github.com/yourusername/kor-assetforge/apperrors"
 	"github.com/yourusername/kor-assetforge/models"
 	"github.com/yourusername/kor-assetforge/utils"
+	"go.uber.org/zap"
 	"gorm.io/gorm"
 )
 
@@ -44,13 +47,13 @@ func (h *AssetHandler) TokenizeAsset(c *gin.Context) {
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		apperrors.AbortWithError(c, apperrors.Wrap(err, apperrors.CodeBadRequest, "Invalid request payload", http.StatusBadRequest))
 		return
 	}
 
 	// Validate Stellar address
 	if err := h.stellarClient.ValidateAddress(req.IssuerAccount); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid issuer account address"})
+		apperrors.AbortWithError(c, apperrors.New(apperrors.CodeBadRequest, "Invalid issuer account address", http.StatusBadRequest))
 		return
 	}
 
@@ -71,7 +74,7 @@ func (h *AssetHandler) TokenizeAsset(c *gin.Context) {
 	}
 
 	if err := h.db.Create(&asset).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create asset record"})
+		apperrors.AbortWithError(c, apperrors.Wrap(err, apperrors.CodeDatabaseError, "Failed to create asset record", http.StatusInternalServerError))
 		return
 	}
 
@@ -92,11 +95,13 @@ func (h *AssetHandler) TokenizeAsset(c *gin.Context) {
 	
 	txHash, err := h.stellarClient.InvokeContract(contractID, "mint", params)
 	if err != nil {
-		// Log error but the DB record is already created with verified=false
+		apperrors.Logger.Error("Contract invocation failed",
+			zap.String("symbol", asset.Symbol),
+			zap.Error(err),
+		)
 		c.JSON(http.StatusAccepted, gin.H{
 			"message": "Asset created in database but contract invocation failed",
 			"asset":   asset,
-			"error":   err.Error(),
 		})
 		return
 	}
@@ -133,7 +138,7 @@ func (h *AssetHandler) ListAssets(c *gin.Context) {
 	page, limit := utils.GetPaginationParams(c)
 
 	if err := utils.Paginate(h.db, page, limit, &total, &assets); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch assets"})
+		apperrors.AbortWithError(c, apperrors.Wrap(err, apperrors.CodeDatabaseError, "Failed to fetch assets", http.StatusInternalServerError))
 		return
 	}
 
@@ -170,7 +175,7 @@ func (h *AssetHandler) ListTransactions(c *gin.Context) {
 	}
 
 	if err := utils.Paginate(query, page, limit, &total, &transactions); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch transactions"})
+		apperrors.AbortWithError(c, apperrors.Wrap(err, apperrors.CodeDatabaseError, "Failed to fetch transactions", http.StatusInternalServerError))
 		return
 	}
 
@@ -187,7 +192,7 @@ func (h *AssetHandler) GetAsset(c *gin.Context) {
 	idStr := c.Param("id")
 	id, err := strconv.ParseUint(idStr, 10, 32)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid asset ID"})
+		apperrors.AbortWithError(c, apperrors.New(apperrors.CodeBadRequest, "Invalid asset ID", http.StatusBadRequest))
 		return
 	}
 
@@ -208,7 +213,11 @@ func (h *AssetHandler) GetAsset(c *gin.Context) {
 
 	var asset models.Asset
 	if err := h.db.First(&asset, id).Error; err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Asset not found"})
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			apperrors.AbortWithError(c, apperrors.New(apperrors.CodeNotFound, "Asset not found", http.StatusNotFound))
+		} else {
+			apperrors.AbortWithError(c, apperrors.Wrap(err, apperrors.CodeDatabaseError, "Failed to fetch asset", http.StatusInternalServerError))
+		}
 		return
 	}
 
@@ -235,7 +244,7 @@ func (h *AssetHandler) ListAssetForSale(c *gin.Context) {
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		apperrors.AbortWithError(c, apperrors.Wrap(err, apperrors.CodeBadRequest, "Invalid request payload", http.StatusBadRequest))
 		return
 	}
 
@@ -252,7 +261,7 @@ func (h *AssetHandler) ListAssetForSale(c *gin.Context) {
 	}
 
 	if err := h.db.Create(&listing).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create listing"})
+		apperrors.AbortWithError(c, apperrors.Wrap(err, apperrors.CodeDatabaseError, "Failed to create listing", http.StatusInternalServerError))
 		return
 	}
 
@@ -278,7 +287,7 @@ func (h *AssetHandler) TransferAsset(c *gin.Context) {
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		apperrors.AbortWithError(c, apperrors.Wrap(err, apperrors.CodeBadRequest, "Invalid request payload", http.StatusBadRequest))
 		return
 	}
 
@@ -295,7 +304,7 @@ func (h *AssetHandler) TransferAsset(c *gin.Context) {
 	}
 
 	if err := h.db.Create(&transaction).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to record transaction"})
+		apperrors.AbortWithError(c, apperrors.Wrap(err, apperrors.CodeDatabaseError, "Failed to record transaction", http.StatusInternalServerError))
 		return
 	}
 

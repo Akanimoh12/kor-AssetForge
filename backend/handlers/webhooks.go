@@ -12,6 +12,7 @@ import (
 	"os"
 
 	"github.com/gin-gonic/gin"
+	"github.com/yourusername/kor-assetforge/apperrors"
 	"github.com/yourusername/kor-assetforge/models"
 	"gorm.io/gorm"
 )
@@ -45,7 +46,7 @@ func (h *WebhookHandler) HandleStellarEvent(c *gin.Context) {
 	if secret != "" && signature != "" {
 		body, _ := io.ReadAll(c.Request.Body)
 		if !verifySignature(body, signature, secret) {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid signature"})
+			apperrors.AbortWithError(c, apperrors.New(apperrors.CodeUnauthorized, "Invalid signature", http.StatusUnauthorized))
 			return
 		}
 		// Reset body for binding
@@ -54,7 +55,7 @@ func (h *WebhookHandler) HandleStellarEvent(c *gin.Context) {
 
 	var event StellarEvent
 	if err := c.ShouldBindJSON(&event); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid event payload"})
+		apperrors.AbortWithError(c, apperrors.Wrap(err, apperrors.CodeBadRequest, "Invalid event payload", http.StatusBadRequest))
 		return
 	}
 

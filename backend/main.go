@@ -3,9 +3,11 @@ package main
 import (
 	"log"
 	"os"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
+	"github.com/yourusername/kor-assetforge/apperrors"
 	"github.com/yourusername/kor-assetforge/config"
 	"github.com/yourusername/kor-assetforge/handlers"
 	"github.com/yourusername/kor-assetforge/utils"
@@ -42,9 +44,15 @@ func main() {
 	// Setup router
 	router := gin.New() // Use gin.New() instead of gin.Default() to avoid default logger/recovery
 	
+	debugMode := strings.EqualFold(os.Getenv("DEBUG_MODE"), "true")
+
 	// Use custom enhanced middleware
-	router.Use(handlers.RequestLogger())
-	router.Use(handlers.GlobalErrorHandler())
+	router.Use(
+		handlers.RequestLogger(),
+		apperrors.ErrorHandler(debugMode),
+	)
+
+	router.GET("/metrics", apperrors.MetricsHandler)
 
 	// Health check endpoint
 	router.GET("/health", func(c *gin.Context) {
