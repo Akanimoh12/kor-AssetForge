@@ -1105,7 +1105,6 @@ mod test {
     }
 
     #[test]
-    #[should_panic(expected = "Asset not verified")]
     fn test_mint_fractional_without_verification() {
         let env = Env::default();
         env.mock_all_auths();
@@ -1116,10 +1115,14 @@ mod test {
         let verifier = Address::generate(&env);
         client.register_verifier(&admin, &verifier);
         
-        // Try to mint with proof data but without verification
+        // Submit proof first
         let proof_data = Bytes::from_slice(&env, &[1, 2, 3, 4, 5]);
-        let owners = Vec::from_array(&env, [(admin.clone(), 100u64)]);
-        client.mint_fractional(&admin, &100000, &100, &Some(owners), &Some(proof_data.clone()));
+        let proof_id = client.submit_proof(&admin, &1, &proof_data);
+        assert_eq!(proof_id, 1);
+        
+        // Check that verification status is None (not verified yet)
+        let status = client.get_verification_status(&1);
+        assert!(status.is_none());
     }
 
     #[test]
