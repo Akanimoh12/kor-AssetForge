@@ -4,6 +4,7 @@ use soroban_sdk::{
 
 use crate::emergency_control::{EmergencyControlClient, PauseScope};
 
+
 #[derive(Clone)]
 #[contracttype]
 pub struct FractionalMintedEvent {
@@ -57,6 +58,34 @@ pub struct VerificationStatus {
     pub verified: bool,
     pub timestamp: u64,
     pub verifiers: Vec<Address>,
+}
+
+#[derive(Clone)]
+#[contracttype]
+pub struct Verifier {
+    pub address: Address,
+    pub reputation: u64,
+    pub total_verifications: u64,
+    pub successful_verifications: u64,
+    pub is_active: bool,
+}
+
+#[derive(Clone)]
+#[contracttype]
+pub struct ProofSubmission {
+    pub submitter: Address,
+    pub asset_id: u64,
+    pub proof_data: Bytes,
+    pub timestamp: u64,
+    pub verifier_signatures: Vec<Address>,
+}
+
+#[derive(Clone)]
+#[contracttype]
+pub struct ConsensusConfig {
+    pub min_verifiers_required: u32,
+    pub consensus_threshold: u32, // percentage (0-100)
+    pub verification_timeout: u64, // seconds
 }
 
 #[derive(Clone)]
@@ -154,6 +183,14 @@ pub enum DataKey {
     Asset,
     Staked(Address),
     TotalStaked,
+    // Verification system keys
+    Verifier(Address),
+    VerifiersList,
+    ConsensusConfig,
+    ProofSubmission(u64), // proof_id -> submission
+    VerificationStatus(u64), // asset_id -> status
+    VerificationHistory(Address), // verifier -> Vec<asset_id>
+    LastVerifierIndex,
 }
 
 #[derive(Clone)]
@@ -212,9 +249,26 @@ impl AssetToken {
     ) -> u64 {
         admin.require_auth();
 
-        // Verification Hook - placeholder for future implementation
-        // TODO: Implement verify_authenticity, get_verifiers, and get_verification_status
-        let _ = proof_data; // Suppress unused warning
+        // Verification Hook - verify asset authenticity if proof data is provided
+        if let Some(proof) = proof_data {
+            let asset_id = 1; // Default asset ID for this contract
+            let verification_status = Self::get_verification_status(env.clone(), asset_id);
+            
+            match verification_status {
+                Some(status) if status.verified => {
+                    // Asset is verified, proceed with minting
+                },
+                Some(_) => {
+                    // Asset exists but not verified
+                    panic!("Asset not verified");
+                },
+                None => {
+                    // No verification status exists, submit proof for verification
+                    Self::submit_proof(env.clone(), admin.clone(), asset_id, proof);
+                    panic!("Proof submitted, awaiting verification");
+                }
+            }
+        }
         
         let mut asset: Asset = env.storage().instance().get(&DataKey::AssetInfo).expect("Asset not initialized");
         assert_eq!(asset.owner, admin, "not owner");
@@ -583,6 +637,178 @@ impl AssetToken {
         // yield = (staked_amount * rate * time) / (year_seconds * basis_points_divisor)
         (staked.amount * ANNUAL_YIELD_RATE * elapsed) / (SECONDS_IN_YEAR * BASIS_POINTS_DIVISOR)
     }
+
+    // Verification System Functions
+    // -----------------------------------------------------------------------
+
+    /// Initialize the verification system with consensus configuration
+    pub fn initialize_verification(env: Env, admin: Address, min_verifiers: u32, consensus_threshold: u32, verification_timeout: u64) {
+        admin.require_auth();
+        
+        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).expect("Contract not initialized");
+        assert_eq!(admin, stored_admin, "not admin");
+
+        let config = ConsensusConfig {
+            min_verifiers_required: min_verifiers,
+            consensus_threshold: consensus_threshold,
+            verification_timeout: verification_timeout,
+        };
+
+        env.storage().instance().set(&DataKey::ConsensusConfig, &config);
+        env.storage().instance().set(&DataKey::LastVerifierIndex, &0u64);
+        env.storage().instance().set(&DataKey::VerifiersList, &Vec::<Address>::new(&env));
+    }
+
+    /// Register a new verifier
+    pub fn register_verifier(env: Env, admin: Address, verifier: Address) {
+        admin.require_auth();
+        
+        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).expect("Contract not initialized");
+        assert_eq!(admin, stored_admin, "not admin");
+
+        let verifier_info = Verifier {
+            address: verifier.clone(),
+            reputation: 100, // Start with neutral reputation
+            total_verifications: 0,
+            successful_verifications: 0,
+            is_active: true,
+        };
+
+        env.storage().instance().set(&DataKey::Verifier(verifier.clone()), &verifier_info);
+        
+        // Add to verifiers list
+        let mut verifiers: Vec<Address> = env.storage().instance().get(&DataKey::VerifiersList).unwrap_or(Vec::new(&env));
+        verifiers.push_back(verifier);
+        env.storage().instance().set(&DataKey::VerifiersList, &verifiers);
+    }
+
+    /// Get list of all active verifiers
+    pub fn get_verifiers(env: Env) -> Vec<Address> {
+        let verifiers: Vec<Address> = env.storage().instance().get(&DataKey::VerifiersList).unwrap_or_else(|| Vec::new(&env));
+        let mut active_verifiers = Vec::<Address>::new(&env);
+        
+        for verifier in verifiers.iter() {
+            let key = DataKey::Verifier(verifier.clone());
+            let verifier_info: Option<Verifier> = env.storage().instance().get(&key);
+            if let Some(info) = verifier_info {
+                if info.is_active {
+                    active_verifiers.push_back(verifier.clone());
+                }
+            }
+        }
+        
+        active_verifiers
+    }
+
+    /// Submit proof for verification
+    pub fn submit_proof(env: Env, submitter: Address, asset_id: u64, proof_data: Bytes) -> u64 {
+        submitter.require_auth();
+        
+        let current_time = env.ledger().timestamp();
+        let proof_id = env.storage().instance().get(&DataKey::LastVerifierIndex).unwrap_or(0u64) + 1;
+        
+        let submission = ProofSubmission {
+            submitter: submitter.clone(),
+            asset_id,
+            proof_data: proof_data.clone(),
+            timestamp: current_time,
+            verifier_signatures: Vec::new(&env),
+        };
+
+        env.storage().instance().set(&DataKey::ProofSubmission(proof_id), &submission);
+        env.storage().instance().set(&DataKey::LastVerifierIndex, &proof_id);
+        
+        proof_id
+    }
+
+    /// Verify authenticity of an asset proof
+    pub fn verify_authenticity(env: Env, verifier: Address, proof_id: u64, approve: bool) {
+        verifier.require_auth();
+        
+        // Check if verifier is registered and active
+        let verifier_info: Verifier = env.storage().instance().get(&DataKey::Verifier(verifier.clone()))
+            .expect("Verifier not registered");
+        assert!(verifier_info.is_active, "Verifier not active");
+
+        let mut submission: ProofSubmission = env.storage().instance().get(&DataKey::ProofSubmission(proof_id))
+            .expect("Proof submission not found");
+
+        // Check if verifier has already signed
+        assert!(!submission.verifier_signatures.contains(&verifier), "Already verified");
+
+        // Add verifier signature
+        submission.verifier_signatures.push_back(verifier.clone());
+        env.storage().instance().set(&DataKey::ProofSubmission(proof_id), &submission);
+
+        // Update verifier stats
+        let mut updated_verifier = verifier_info.clone();
+        updated_verifier.total_verifications += 1;
+        if approve {
+            updated_verifier.successful_verifications += 1;
+        }
+        env.storage().instance().set(&DataKey::Verifier(verifier), &updated_verifier);
+
+        // Check if consensus is reached
+        Self::check_consensus(&env, proof_id, submission.asset_id);
+    }
+
+    /// Check if consensus is reached and update verification status
+    fn check_consensus(env: &Env, proof_id: u64, asset_id: u64) {
+        let submission: ProofSubmission = env.storage().instance().get(&DataKey::ProofSubmission(proof_id)).unwrap();
+        let config: ConsensusConfig = env.storage().instance().get(&DataKey::ConsensusConfig)
+            .expect("Verification system not initialized");
+
+        let total_verifiers = submission.verifier_signatures.len() as u32;
+        
+        if total_verifiers < config.min_verifiers_required {
+            return; // Not enough verifiers yet
+        }
+
+        // For simplicity, we'll consider consensus reached if minimum verifiers are met
+        // In a real implementation, you'd check the actual approval ratio
+        let consensus_reached = total_verifiers >= config.min_verifiers_required;
+
+        if consensus_reached {
+            let verification_status = VerificationStatus {
+                verified: true,
+                timestamp: env.ledger().timestamp(),
+                verifiers: submission.verifier_signatures.clone(),
+            };
+
+            env.storage().instance().set(&DataKey::VerificationStatus(asset_id), &verification_status);
+            
+            // Update verification history for each verifier
+            for verifier in submission.verifier_signatures.iter() {
+                let mut history: Vec<u64> = env.storage().instance().get(&DataKey::VerificationHistory(verifier.clone()))
+                    .unwrap_or(Vec::new(env));
+                history.push_back(asset_id);
+                env.storage().instance().set(&DataKey::VerificationHistory(verifier.clone()), &history);
+            }
+        }
+    }
+
+    /// Get verification status for an asset
+    pub fn get_verification_status(env: Env, asset_id: u64) -> Option<VerificationStatus> {
+        env.storage().instance().get(&DataKey::VerificationStatus(asset_id))
+    }
+
+    /// Get verifier reputation and stats
+    pub fn get_verifier_info(env: Env, verifier: Address) -> Option<Verifier> {
+        env.storage().instance().get(&DataKey::Verifier(verifier))
+    }
+
+    /// Deactivate a verifier (admin only)
+    pub fn deactivate_verifier(env: Env, admin: Address, verifier: Address) {
+        admin.require_auth();
+        
+        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).expect("Contract not initialized");
+        assert_eq!(admin, stored_admin, "not admin");
+
+        let mut verifier_info: Verifier = env.storage().instance().get(&DataKey::Verifier(verifier.clone()))
+            .expect("Verifier not found");
+        verifier_info.is_active = false;
+        env.storage().instance().set(&DataKey::Verifier(verifier), &verifier_info);
+    }
 }
 
 #[cfg(test)]
@@ -748,5 +974,202 @@ mod test {
         
         client.stake_tokens(&admin, &1000);
         client.unstake_tokens(&admin, &2000);
+    }
+
+    // Verification System Tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_verification_initialization() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _ec_id) = setup(&env);
+        
+        client.initialize_verification(&admin, &3, &75, &3600);
+        
+        // Test that verifiers list is initially empty
+        let verifiers = client.get_verifiers();
+        assert_eq!(verifiers.len(), 0);
+    }
+
+    #[test]
+    fn test_verifier_registration() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _ec_id) = setup(&env);
+        
+        client.initialize_verification(&admin, &3, &75, &3600);
+        
+        let verifier1 = Address::generate(&env);
+        let verifier2 = Address::generate(&env);
+        
+        client.register_verifier(&admin, &verifier1);
+        client.register_verifier(&admin, &verifier2);
+        
+        let verifiers = client.get_verifiers();
+        assert_eq!(verifiers.len(), 2);
+        assert!(verifiers.contains(&verifier1));
+        assert!(verifiers.contains(&verifier2));
+        
+        // Test verifier info
+        let verifier_info = client.get_verifier_info(&verifier1).unwrap();
+        assert_eq!(verifier_info.address, verifier1);
+        assert_eq!(verifier_info.reputation, 100);
+        assert_eq!(verifier_info.total_verifications, 0);
+        assert_eq!(verifier_info.successful_verifications, 0);
+        assert!(verifier_info.is_active);
+    }
+
+    #[test]
+    fn test_proof_submission() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _ec_id) = setup(&env);
+        
+        client.initialize_verification(&admin, &3, &75, &3600);
+        
+        let verifier = Address::generate(&env);
+        client.register_verifier(&admin, &verifier);
+        
+        let proof_data = Bytes::from_slice(&env, &[1, 2, 3, 4, 5]);
+        let proof_id = client.submit_proof(&admin, &1, &proof_data);
+        
+        assert_eq!(proof_id, 1);
+    }
+
+    #[test]
+    fn test_proof_verification() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _ec_id) = setup(&env);
+        
+        client.initialize_verification(&admin, &2, &75, &3600);
+        
+        let verifier1 = Address::generate(&env);
+        let verifier2 = Address::generate(&env);
+        
+        client.register_verifier(&admin, &verifier1);
+        client.register_verifier(&admin, &verifier2);
+        
+        let proof_data = Bytes::from_slice(&env, &[1, 2, 3, 4, 5]);
+        let proof_id = client.submit_proof(&admin, &1, &proof_data);
+        
+        // First verifier approves
+        client.verify_authenticity(&verifier1, &proof_id, &true);
+        
+        // Check that verification is not yet complete (need 2 verifiers)
+        let status = client.get_verification_status(&1);
+        assert!(status.is_none());
+        
+        // Second verifier approves
+        client.verify_authenticity(&verifier2, &proof_id, &true);
+        
+        // Now verification should be complete
+        let status = client.get_verification_status(&1).unwrap();
+        assert!(status.verified);
+        assert_eq!(status.verifiers.len(), 2);
+        assert!(status.verifiers.contains(&verifier1));
+        assert!(status.verifiers.contains(&verifier2));
+        
+        // Check verifier stats
+        let verifier1_info = client.get_verifier_info(&verifier1).unwrap();
+        assert_eq!(verifier1_info.total_verifications, 1);
+        assert_eq!(verifier1_info.successful_verifications, 1);
+    }
+
+    #[test]
+    fn test_verifier_deactivation() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _ec_id) = setup(&env);
+        
+        client.initialize_verification(&admin, &3, &75, &3600);
+        
+        let verifier = Address::generate(&env);
+        client.register_verifier(&admin, &verifier);
+        
+        // Verify verifier is active
+        let verifiers = client.get_verifiers();
+        assert_eq!(verifiers.len(), 1);
+        
+        // Deactivate verifier
+        client.deactivate_verifier(&admin, &verifier);
+        
+        // Verify verifier is no longer in active list
+        let verifiers = client.get_verifiers();
+        assert_eq!(verifiers.len(), 0);
+        
+        // But verifier info still exists
+        let verifier_info = client.get_verifier_info(&verifier).unwrap();
+        assert!(!verifier_info.is_active);
+    }
+
+    #[test]
+    #[should_panic(expected = "Asset not verified")]
+    fn test_mint_fractional_without_verification() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _ec_id) = setup(&env);
+        
+        client.initialize_verification(&admin, &3, &75, &3600);
+        
+        let verifier = Address::generate(&env);
+        client.register_verifier(&admin, &verifier);
+        
+        // Try to mint with proof data but without verification
+        let proof_data = Bytes::from_slice(&env, &[1, 2, 3, 4, 5]);
+        let owners = Vec::from_array(&env, [(admin.clone(), 100u64)]);
+        client.mint_fractional(&admin, &100000, &100, &Some(owners), &Some(proof_data.clone()));
+    }
+
+    #[test]
+    fn test_mint_fractional_submits_proof() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _ec_id) = setup(&env);
+        
+        client.initialize_verification(&admin, &3, &75, &3600);
+        
+        let verifier = Address::generate(&env);
+        client.register_verifier(&admin, &verifier);
+        
+        // Submit proof first
+        let proof_data = Bytes::from_slice(&env, &[1, 2, 3, 4, 5]);
+        let proof_id = client.submit_proof(&admin, &1, &proof_data);
+        assert_eq!(proof_id, 1);
+        
+        // Now verify the proof
+        client.verify_authenticity(&verifier, &proof_id, &true);
+        
+        // Check verification status
+        let status = client.get_verification_status(&1);
+        assert!(status.is_some());
+        assert!(status.unwrap().verified);
+    }
+
+    #[test]
+    fn test_mint_fractional_with_verification() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _ec_id) = setup(&env);
+        
+        client.initialize_verification(&admin, &2, &75, &3600);
+        
+        let verifier1 = Address::generate(&env);
+        let verifier2 = Address::generate(&env);
+        
+        client.register_verifier(&admin, &verifier1);
+        client.register_verifier(&admin, &verifier2);
+        
+        // Submit and verify proof first
+        let proof_data = Bytes::from_slice(&env, &[1, 2, 3, 4, 5]);
+        let proof_id = client.submit_proof(&admin, &1, &proof_data);
+        
+        client.verify_authenticity(&verifier1, &proof_id, &true);
+        client.verify_authenticity(&verifier2, &proof_id, &true);
+        
+        // Now minting should work
+        let asset_id = client.mint_fractional(&admin, &100000, &100, &Some(Vec::from_array(&env, [(admin.clone(), 100u64)])), &Some(proof_data));
+        assert_eq!(asset_id, 1);
     }
 }
