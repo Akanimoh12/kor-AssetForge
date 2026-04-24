@@ -18,6 +18,9 @@ kor-AssetForge enables fractional ownership of real-world assets like real estat
 
 - Asset tokenization with fractional ownership
 - On-chain marketplace for listing and trading
+- Compliance reporting with audit trail, exports, and scheduling
+- Fractional transfer restrictions (whitelisting, lock-up, approval workflow)
+- Multi-asset registry and per-asset analytics
 - RESTful API for frontend integration
 - PostgreSQL for off-chain metadata storage
 - Soroban smart contracts for trustless transactions
@@ -130,6 +133,8 @@ MIT License - see [LICENSE](LICENSE) file for details
 - [Stellar Documentation](https://developers.stellar.org/)
 - [Soroban Documentation](https://soroban.stellar.org/docs)
 - [Stellar Go SDK](https://github.com/stellar/go)
+- [Compliance Reporting Docs](docs/compliance_reporting.md)
+- [Gas Optimization Notes](docs/gas_optimization.md)
 
 ## Support
 

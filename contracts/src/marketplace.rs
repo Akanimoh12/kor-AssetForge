@@ -1,4 +1,4 @@
-use soroban_sdk::{contract, contracterror, contractimpl, contracttype, Address, Env, Symbol, Vec};
+use soroban_sdk::{contract, contracterror, contractimpl, contracttype, Address, Env, String, Symbol, Vec};
 
 use crate::emergency_control::{EmergencyControlClient, PauseScope};
 use crate::governance::GovernanceClient;
@@ -26,6 +26,114 @@ pub struct ComplianceMetrics {
     pub holders: u32,
 }
 
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ReportFormat {
+    Json,
+    Csv,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AssetConfig {
+    pub asset_id: u64,
+    pub metadata: String,
+    pub governance_required: bool,
+    pub deprecated: bool,
+    pub min_trade_amount: i128,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TransferRestrictionConfig {
+    pub whitelist_required: bool,
+    pub min_holding_seconds: u64,
+    pub lockup_seconds: u64,
+    pub max_transfer_amount: i128,
+    pub approval_required: bool,
+    pub emergency_override_enabled: bool,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TransferApprovalRequest {
+    pub id: u64,
+    pub asset_id: u64,
+    pub requester: Address,
+    pub beneficiary: Address,
+    pub amount: i128,
+    pub reason: String,
+    pub approved: bool,
+    pub reviewed: bool,
+    pub created_at: u64,
+    pub reviewed_at: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AssetComplianceSnapshot {
+    pub asset_id: u64,
+    pub timestamp: u64,
+    pub transaction_count: u64,
+    pub volume: i128,
+    pub taxable_volume: i128,
+    pub holders: u32,
+    pub restricted_transfer_count: u64,
+    pub compliance_failures: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AuditTrailEntry {
+    pub timestamp: u64,
+    pub actor: Address,
+    pub action: Symbol,
+    pub asset_id: u64,
+    pub amount: i128,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReportSchedule {
+    pub id: u64,
+    pub asset_id: Option<u64>,
+    pub cadence_seconds: u64,
+    pub next_run_at: u64,
+    pub format: ReportFormat,
+    pub enabled: bool,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RegulatoryReport {
+    pub id: u64,
+    pub generated_at: u64,
+    pub asset_id: Option<u64>,
+    pub format: ReportFormat,
+    pub total_value: i128,
+    pub volume: i128,
+    pub taxable_volume: i128,
+    pub holders: u32,
+    pub restricted_transfer_count: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ReportExport {
+    Json(RegulatoryReport),
+    Csv(RegulatoryReport),
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AssetAnalytics {
+    pub asset_id: u64,
+    pub listing_count: u64,
+    pub transaction_count: u64,
+    pub volume: i128,
+    pub holders: u32,
+}
+
 
 #[derive(Clone)]
 #[contracttype]
@@ -43,6 +151,32 @@ pub enum MarketplaceDataKey {
     MarketplaceAdmin,
     AssetPrivate(u64),
     Whitelisted(u64, Address),
+    ListingNonce,
+    Listing(u64),
+    RegisteredAssets,
+    AssetConfig(u64),
+    ListingCount(u64),
+    TransactionCount(u64),
+    Volume(u64),
+    TaxableVolume(u64),
+    HolderCount(u64),
+    HolderSeen(u64, Address),
+    FirstHeldAt(u64, Address),
+    LockupUntil(u64, Address),
+    DailyTransfer(u64, Address, u64),
+    RestrictionConfig(u64),
+    ComplianceVerified(u64, Address),
+    TransferRequestNonce,
+    TransferRequest(u64),
+    TransferApproved(u64),
+    RestrictedTransferCount(u64),
+    ComplianceFailures(u64),
+    AuditTrail,
+    ComplianceHistory(u64),
+    ReportScheduleNonce,
+    ReportSchedule(u64),
+    ReportNonce,
+    GeneratedReport(u64),
 }
 
 /// Storage keys for buy-back and burn system.
@@ -155,16 +289,42 @@ impl Marketplace {
         // Enforce whitelisting if asset is private
         Self::require_whitelisted_if_private(&env, asset_id, &seller);
 
-        // Generate listing ID
-        let listing_id: u64 = 1;
+        // Block new listings for deprecated assets.
+        if let Some(cfg) = env.storage().persistent().get::<_, AssetConfig>(&MarketplaceDataKey::AssetConfig(asset_id)) {
+            if cfg.deprecated {
+                panic!("asset is deprecated");
+            }
+        }
 
-        let _listing = Listing {
+        Self::register_asset_if_missing(&env, asset_id);
+
+        // Generate listing ID
+        let listing_id: u64 = env
+            .storage()
+            .instance()
+            .get(&MarketplaceDataKey::ListingNonce)
+            .unwrap_or(0)
+            + 1;
+        env.storage().instance().set(&MarketplaceDataKey::ListingNonce, &listing_id);
+
+        let listing = Listing {
             asset_id,
-            seller,
+            seller: seller.clone(),
             price,
             amount,
             active: true,
         };
+
+        env.storage().persistent().set(&MarketplaceDataKey::Listing(listing_id), &listing);
+
+        let listing_count: u64 = env.storage().instance().get(&MarketplaceDataKey::ListingCount(asset_id)).unwrap_or(0) + 1;
+        env.storage().instance().set(&MarketplaceDataKey::ListingCount(asset_id), &listing_count);
+
+        let total_value = price.checked_mul(amount).unwrap_or(0);
+        let existing_total: i128 = env.storage().instance().get(&MarketplaceDataKey::Volume(asset_id)).unwrap_or(0);
+        env.storage().instance().set(&MarketplaceDataKey::Volume(asset_id), &(existing_total + total_value));
+
+        Self::append_audit_entry(&env, seller, Symbol::new(&env, "listing_created"), asset_id, total_value);
 
         listing_id
     }
@@ -174,33 +334,18 @@ impl Marketplace {
     pub fn purchase(
         env: Env,
         buyer: Address,
-        _listing_id: u64,
+        listing_id: u64,
         amount: i128,
         asset_id: u64,
         emergency_control_id: Address,
     ) -> bool {
-        buyer.require_auth();
-
-        // Enforce pause check for trading operations
-        let ec_client = EmergencyControlClient::new(&env, &emergency_control_id);
-        ec_client.require_not_paused(&asset_id, &PauseScope::Trading);
-
-        // Enforce whitelisting if asset is private
-        Self::require_whitelisted_if_private(&env, asset_id, &buyer);
-
-        // Collect fee and credit referral reward
-        if env.storage().instance().has(&BuyBackDataKey::BuyBackConfigKey) {
-            let fee = Self::collect_fee(env.clone(), amount);
-            Self::credit_referral_reward(&env, &buyer, fee);
-        }
-
-        true
+        Self::purchase_internal(env, buyer, listing_id, amount, asset_id, emergency_control_id, None)
     }
 
     pub fn cancel_listing(
         env: Env,
         seller: Address,
-        _listing_id: u64,
+        listing_id: u64,
         asset_id: u64,
         emergency_control_id: Address,
     ) -> bool {
@@ -210,12 +355,22 @@ impl Marketplace {
         let ec_client = EmergencyControlClient::new(&env, &emergency_control_id);
         ec_client.require_not_paused(&asset_id, &PauseScope::Trading);
 
+        if let Some(mut listing) = env.storage().persistent().get::<_, Listing>(&MarketplaceDataKey::Listing(listing_id)) {
+            if listing.seller != seller {
+                panic!("only listing owner can cancel");
+            }
+            listing.active = false;
+            env.storage().persistent().set(&MarketplaceDataKey::Listing(listing_id), &listing);
+        }
+
+        Self::append_audit_entry(&env, seller, Symbol::new(&env, "listing_canceled"), asset_id, 0);
+
         true
     }
 
     /// Get listing details
-    pub fn get_listing(_env: Env, _listing_id: u64) -> Option<Listing> {
-        None
+    pub fn get_listing(env: Env, listing_id: u64) -> Option<Listing> {
+        env.storage().persistent().get(&MarketplaceDataKey::Listing(listing_id))
     }
 
     // -----------------------------------------------------------------------
@@ -256,8 +411,9 @@ impl Marketplace {
         Self::require_admin(&env, &admin);
         for user in users.iter() {
             env.storage().persistent().set(&MarketplaceDataKey::Whitelisted(asset_id, user.clone()), &true);
-            env.events().publish((Symbol::new(&env, "user_whitelisted"), asset_id), user);
         }
+        env.events().publish((Symbol::new(&env, "bulk_whitelist"), asset_id), users.len());
+        Self::append_audit_entry(&env, admin, Symbol::new(&env, "bulk_whitelist"), asset_id, users.len() as i128);
     }
 
     /// Check if a user is whitelisted for an asset
@@ -268,6 +424,245 @@ impl Marketplace {
     /// Check if an asset is private
     pub fn is_private(env: Env, asset_id: u64) -> bool {
         env.storage().persistent().get(&MarketplaceDataKey::AssetPrivate(asset_id)).unwrap_or(false)
+    }
+
+    /// Register an asset for isolated per-asset configuration.
+    pub fn register_asset(
+        env: Env,
+        admin: Address,
+        asset_id: u64,
+        metadata: String,
+        governance_required: bool,
+        min_trade_amount: i128,
+    ) {
+        Self::require_admin(&env, &admin);
+        if min_trade_amount < 0 {
+            panic!("min trade amount must be non-negative");
+        }
+
+        if env.storage().persistent().has(&MarketplaceDataKey::AssetConfig(asset_id)) {
+            panic!("asset already registered");
+        }
+
+        let cfg = AssetConfig {
+            asset_id,
+            metadata,
+            governance_required,
+            deprecated: false,
+            min_trade_amount,
+        };
+
+        env.storage().persistent().set(&MarketplaceDataKey::AssetConfig(asset_id), &cfg);
+        Self::append_registered_asset(&env, asset_id);
+        Self::append_audit_entry(&env, admin, Symbol::new(&env, "asset_registered"), asset_id, 0);
+    }
+
+    pub fn update_asset_config(
+        env: Env,
+        admin: Address,
+        asset_id: u64,
+        metadata: String,
+        governance_required: bool,
+        min_trade_amount: i128,
+    ) {
+        Self::require_admin(&env, &admin);
+        let mut cfg: AssetConfig = env
+            .storage()
+            .persistent()
+            .get(&MarketplaceDataKey::AssetConfig(asset_id))
+            .expect("asset not registered");
+
+        cfg.metadata = metadata;
+        cfg.governance_required = governance_required;
+        cfg.min_trade_amount = min_trade_amount;
+
+        env.storage().persistent().set(&MarketplaceDataKey::AssetConfig(asset_id), &cfg);
+        Self::append_audit_entry(&env, admin, Symbol::new(&env, "asset_updated"), asset_id, 0);
+    }
+
+    pub fn deprecate_asset(env: Env, admin: Address, asset_id: u64, deprecated: bool) {
+        Self::require_admin(&env, &admin);
+        let mut cfg: AssetConfig = env
+            .storage()
+            .persistent()
+            .get(&MarketplaceDataKey::AssetConfig(asset_id))
+            .expect("asset not registered");
+        cfg.deprecated = deprecated;
+        env.storage().persistent().set(&MarketplaceDataKey::AssetConfig(asset_id), &cfg);
+        Self::append_audit_entry(&env, admin, Symbol::new(&env, "asset_deprecated"), asset_id, if deprecated { 1 } else { 0 });
+    }
+
+    pub fn migrate_asset(env: Env, admin: Address, old_asset_id: u64, new_asset_id: u64) {
+        Self::require_admin(&env, &admin);
+        let old_cfg: AssetConfig = env
+            .storage()
+            .persistent()
+            .get(&MarketplaceDataKey::AssetConfig(old_asset_id))
+            .expect("source asset not registered");
+        if env.storage().persistent().has(&MarketplaceDataKey::AssetConfig(new_asset_id)) {
+            panic!("target asset already registered");
+        }
+
+        let new_cfg = AssetConfig {
+            asset_id: new_asset_id,
+            metadata: old_cfg.metadata,
+            governance_required: old_cfg.governance_required,
+            deprecated: false,
+            min_trade_amount: old_cfg.min_trade_amount,
+        };
+
+        env.storage().persistent().set(&MarketplaceDataKey::AssetConfig(new_asset_id), &new_cfg);
+        Self::append_registered_asset(&env, new_asset_id);
+        Self::append_audit_entry(&env, admin, Symbol::new(&env, "asset_migrated"), new_asset_id, old_asset_id as i128);
+    }
+
+    pub fn get_asset_config(env: Env, asset_id: u64) -> Option<AssetConfig> {
+        env.storage().persistent().get(&MarketplaceDataKey::AssetConfig(asset_id))
+    }
+
+    pub fn list_registered_assets(env: Env) -> Vec<u64> {
+        env.storage()
+            .instance()
+            .get(&MarketplaceDataKey::RegisteredAssets)
+            .unwrap_or(Vec::new(&env))
+    }
+
+    pub fn get_asset_analytics(env: Env, asset_id: u64) -> AssetAnalytics {
+        AssetAnalytics {
+            asset_id,
+            listing_count: env.storage().instance().get(&MarketplaceDataKey::ListingCount(asset_id)).unwrap_or(0),
+            transaction_count: env.storage().instance().get(&MarketplaceDataKey::TransactionCount(asset_id)).unwrap_or(0),
+            volume: env.storage().instance().get(&MarketplaceDataKey::Volume(asset_id)).unwrap_or(0),
+            holders: env.storage().instance().get(&MarketplaceDataKey::HolderCount(asset_id)).unwrap_or(0),
+        }
+    }
+
+    pub fn configure_transfer_restrictions(
+        env: Env,
+        admin: Address,
+        asset_id: u64,
+        whitelist_required: bool,
+        min_holding_seconds: u64,
+        lockup_seconds: u64,
+        max_transfer_amount: i128,
+        approval_required: bool,
+        emergency_override_enabled: bool,
+    ) {
+        Self::require_admin(&env, &admin);
+        if max_transfer_amount <= 0 {
+            panic!("max transfer amount must be positive");
+        }
+
+        let cfg = TransferRestrictionConfig {
+            whitelist_required,
+            min_holding_seconds,
+            lockup_seconds,
+            max_transfer_amount,
+            approval_required,
+            emergency_override_enabled,
+        };
+
+        env.storage().persistent().set(&MarketplaceDataKey::RestrictionConfig(asset_id), &cfg);
+        Self::append_audit_entry(&env, admin, Symbol::new(&env, "restrictions_configured"), asset_id, max_transfer_amount);
+    }
+
+    pub fn set_compliance_verified(env: Env, admin: Address, asset_id: u64, user: Address, verified: bool) {
+        Self::require_admin(&env, &admin);
+        env.storage().persistent().set(&MarketplaceDataKey::ComplianceVerified(asset_id, user.clone()), &verified);
+        env.events().publish((Symbol::new(&env, "compliance_verified"), asset_id), (user, verified));
+    }
+
+    pub fn set_lockup_until(env: Env, admin: Address, asset_id: u64, user: Address, lockup_until: u64) {
+        Self::require_admin(&env, &admin);
+        env.storage().persistent().set(&MarketplaceDataKey::LockupUntil(asset_id, user), &lockup_until);
+    }
+
+    pub fn request_transfer_approval(
+        env: Env,
+        requester: Address,
+        beneficiary: Address,
+        asset_id: u64,
+        amount: i128,
+        reason: String,
+    ) -> u64 {
+        requester.require_auth();
+        if amount <= 0 {
+            panic!("amount must be positive");
+        }
+
+        let id: u64 = env.storage().instance().get(&MarketplaceDataKey::TransferRequestNonce).unwrap_or(0) + 1;
+        env.storage().instance().set(&MarketplaceDataKey::TransferRequestNonce, &id);
+
+        let req = TransferApprovalRequest {
+            id,
+            asset_id,
+            requester: requester.clone(),
+            beneficiary,
+            amount,
+            reason,
+            approved: false,
+            reviewed: false,
+            created_at: env.ledger().timestamp(),
+            reviewed_at: 0,
+        };
+        env.storage().persistent().set(&MarketplaceDataKey::TransferRequest(id), &req);
+        Self::append_audit_entry(&env, requester, Symbol::new(&env, "approval_requested"), asset_id, amount);
+        id
+    }
+
+    pub fn review_transfer_approval(env: Env, admin: Address, request_id: u64, approved: bool) {
+        Self::require_admin(&env, &admin);
+        let mut req: TransferApprovalRequest = env
+            .storage()
+            .persistent()
+            .get(&MarketplaceDataKey::TransferRequest(request_id))
+            .expect("request not found");
+        req.approved = approved;
+        req.reviewed = true;
+        req.reviewed_at = env.ledger().timestamp();
+        env.storage().persistent().set(&MarketplaceDataKey::TransferRequest(request_id), &req);
+        env.storage().persistent().set(&MarketplaceDataKey::TransferApproved(request_id), &approved);
+        Self::append_audit_entry(&env, admin, Symbol::new(&env, "approval_reviewed"), req.asset_id, req.amount);
+    }
+
+    pub fn get_transfer_approval(env: Env, request_id: u64) -> Option<TransferApprovalRequest> {
+        env.storage().persistent().get(&MarketplaceDataKey::TransferRequest(request_id))
+    }
+
+    pub fn get_restricted_transfer_count(env: Env, asset_id: u64) -> u64 {
+        env.storage().instance().get(&MarketplaceDataKey::RestrictedTransferCount(asset_id)).unwrap_or(0)
+    }
+
+    pub fn purchase_with_approval(
+        env: Env,
+        buyer: Address,
+        listing_id: u64,
+        amount: i128,
+        asset_id: u64,
+        request_id: u64,
+        emergency_control_id: Address,
+    ) -> bool {
+        let approved: bool = env
+            .storage()
+            .persistent()
+            .get(&MarketplaceDataKey::TransferApproved(request_id))
+            .unwrap_or(false);
+        if !approved {
+            panic!("transfer approval required");
+        }
+        let ok = Self::purchase_internal(
+            env.clone(),
+            buyer,
+            listing_id,
+            amount,
+            asset_id,
+            emergency_control_id,
+            Some(request_id),
+        );
+        if ok {
+            env.storage().persistent().remove(&MarketplaceDataKey::TransferApproved(request_id));
+        }
+        ok
     }
 
     // Helper: Require admin authorization
@@ -1007,36 +1402,511 @@ impl Marketplace {
     // Compliance Reporting Queries
     // -----------------------------------------------------------------------
     /// Get total tokenized value
-    pub fn get_total_tokenized_value(_env: Env, _asset_id: Option<u64>, time_range: Option<TimeRange>) -> Result<i128, ComplianceError> {
-        if let Some(range) = time_range {
-            if range.start_timestamp > range.end_timestamp {
-                return Err(ComplianceError::InvalidTimeRange);
-            }
-        }
-        // Stub: sum supplies across assets from storage
-        Ok(0)
+    pub fn get_total_tokenized_value(env: Env, asset_id: Option<u64>, time_range: Option<TimeRange>) -> Result<i128, ComplianceError> {
+        Self::validate_time_range(&time_range)?;
+        Ok(Self::aggregate_metric_i128(&env, asset_id, |id| {
+            env.storage().instance().get(&MarketplaceDataKey::Volume(id)).unwrap_or(0)
+        }))
     }
 
     /// Get transaction volume
-    pub fn get_transaction_volume(_env: Env, _asset_id: Option<u64>, time_range: Option<TimeRange>) -> Result<i128, ComplianceError> {
-        if let Some(range) = time_range {
-            if range.start_timestamp > range.end_timestamp {
-                return Err(ComplianceError::InvalidTimeRange);
-            }
-        }
-        // Stub: aggregate transaction volumes
-        Ok(0)
+    pub fn get_transaction_volume(env: Env, asset_id: Option<u64>, time_range: Option<TimeRange>) -> Result<i128, ComplianceError> {
+        Self::validate_time_range(&time_range)?;
+        Ok(Self::aggregate_metric_i128(&env, asset_id, |id| {
+            env.storage().instance().get(&MarketplaceDataKey::Volume(id)).unwrap_or(0)
+        }))
     }
 
     /// Get unique holder count
-    pub fn get_holder_count(_env: Env, _asset_id: Option<u64>, time_range: Option<TimeRange>) -> Result<u32, ComplianceError> {
+    pub fn get_holder_count(env: Env, asset_id: Option<u64>, time_range: Option<TimeRange>) -> Result<u32, ComplianceError> {
+        Self::validate_time_range(&time_range)?;
+        Ok(Self::aggregate_metric_u32(&env, asset_id, |id| {
+            env.storage().instance().get(&MarketplaceDataKey::HolderCount(id)).unwrap_or(0)
+        }))
+    }
+
+    /// Get taxable volume for tax-focused reporting.
+    pub fn get_taxable_volume(env: Env, asset_id: Option<u64>, time_range: Option<TimeRange>) -> Result<i128, ComplianceError> {
+        Self::validate_time_range(&time_range)?;
+        Ok(Self::aggregate_metric_i128(&env, asset_id, |id| {
+            env.storage().instance().get(&MarketplaceDataKey::TaxableVolume(id)).unwrap_or(0)
+        }))
+    }
+
+    /// Run regulatory checks and return pass/fail counters.
+    /// Tuple format: (checked_assets, failed_assets, restricted_transfers)
+    pub fn run_regulatory_checks(env: Env) -> (u32, u32, u64) {
+        let assets = Self::list_registered_assets(env.clone());
+        let mut checked: u32 = 0;
+        let mut failed: u32 = 0;
+        let mut restricted: u64 = 0;
+
+        for id in assets.iter() {
+            checked += 1;
+            let cfg = env.storage().persistent().get::<_, TransferRestrictionConfig>(&MarketplaceDataKey::RestrictionConfig(id));
+            let failures: u64 = env.storage().instance().get(&MarketplaceDataKey::ComplianceFailures(id)).unwrap_or(0);
+            restricted += env.storage().instance().get::<_, u64>(&MarketplaceDataKey::RestrictedTransferCount(id)).unwrap_or(0);
+
+            if failures > 0 {
+                failed += 1;
+                continue;
+            }
+
+            if let Some(c) = cfg {
+                if c.max_transfer_amount <= 0 {
+                    failed += 1;
+                }
+            }
+        }
+
+        (checked, failed, restricted)
+    }
+
+    /// Generate and persist a regulatory report snapshot.
+    pub fn generate_regulatory_report(
+        env: Env,
+        admin: Address,
+        asset_id: Option<u64>,
+        time_range: Option<TimeRange>,
+        format: ReportFormat,
+    ) -> Result<u64, ComplianceError> {
+        Self::require_admin_for_result(&env, &admin)?;
+        Self::build_and_store_report(&env, asset_id, time_range, format)
+    }
+
+    /// Export a generated report in the selected format.
+    pub fn export_report(env: Env, report_id: u64) -> ReportExport {
+        let report: RegulatoryReport = env
+            .storage()
+            .persistent()
+            .get(&MarketplaceDataKey::GeneratedReport(report_id))
+            .expect("report not found");
+
+        match report.format {
+            ReportFormat::Json => ReportExport::Json(report),
+            ReportFormat::Csv => ReportExport::Csv(report),
+        }
+    }
+
+    /// Schedule a recurring regulatory report.
+    pub fn schedule_report(
+        env: Env,
+        admin: Address,
+        asset_id: Option<u64>,
+        cadence_seconds: u64,
+        format: ReportFormat,
+    ) -> Result<u64, ComplianceError> {
+        Self::require_admin_for_result(&env, &admin)?;
+        if cadence_seconds == 0 {
+            panic!("cadence must be positive");
+        }
+
+        let id: u64 = env.storage().instance().get(&MarketplaceDataKey::ReportScheduleNonce).unwrap_or(0) + 1;
+        env.storage().instance().set(&MarketplaceDataKey::ReportScheduleNonce, &id);
+
+        let schedule = ReportSchedule {
+            id,
+            asset_id,
+            cadence_seconds,
+            next_run_at: env.ledger().timestamp() + cadence_seconds,
+            format,
+            enabled: true,
+        };
+        env.storage().persistent().set(&MarketplaceDataKey::ReportSchedule(id), &schedule);
+        Ok(id)
+    }
+
+    /// Execute all due schedules and emit reports.
+    pub fn run_due_reports(env: Env, admin: Address) -> Result<u32, ComplianceError> {
+        Self::require_admin_for_result(&env, &admin)?;
+
+        let now = env.ledger().timestamp();
+        let max_id: u64 = env.storage().instance().get(&MarketplaceDataKey::ReportScheduleNonce).unwrap_or(0);
+        let mut generated = 0;
+
+        for i in 1..=max_id {
+            if let Some(mut schedule) = env.storage().persistent().get::<_, ReportSchedule>(&MarketplaceDataKey::ReportSchedule(i)) {
+                if !schedule.enabled || schedule.next_run_at > now {
+                    continue;
+                }
+
+                let _ = Self::build_and_store_report(
+                    &env,
+                    schedule.asset_id,
+                    Some(TimeRange {
+                        start_timestamp: now.saturating_sub(schedule.cadence_seconds),
+                        end_timestamp: now,
+                    }),
+                    schedule.format.clone(),
+                )?;
+
+                schedule.next_run_at = now + schedule.cadence_seconds;
+                env.storage().persistent().set(&MarketplaceDataKey::ReportSchedule(i), &schedule);
+                generated += 1;
+            }
+        }
+
+        Ok(generated)
+    }
+
+    /// Returns historical compliance snapshots for an asset.
+    pub fn get_historical_compliance(env: Env, asset_id: u64, time_range: Option<TimeRange>) -> Result<Vec<AssetComplianceSnapshot>, ComplianceError> {
+        Self::validate_time_range(&time_range)?;
+        let history: Vec<AssetComplianceSnapshot> = env
+            .storage()
+            .persistent()
+            .get(&MarketplaceDataKey::ComplianceHistory(asset_id))
+            .unwrap_or(Vec::new(&env));
+
+        if time_range.is_none() {
+            return Ok(history);
+        }
+
+        let range = time_range.expect("checked");
+        let mut filtered = Vec::new(&env);
+        for snap in history.iter() {
+            if snap.timestamp >= range.start_timestamp && snap.timestamp <= range.end_timestamp {
+                filtered.push_back(snap);
+            }
+        }
+        Ok(filtered)
+    }
+
+    /// Real-time compliance snapshot for a single asset.
+    pub fn get_real_time_compliance(env: Env, asset_id: u64) -> AssetComplianceSnapshot {
+        Self::build_snapshot(&env, asset_id)
+    }
+
+    fn register_asset_if_missing(env: &Env, asset_id: u64) {
+        if env.storage().persistent().has(&MarketplaceDataKey::AssetConfig(asset_id)) {
+            return;
+        }
+        let cfg = AssetConfig {
+            asset_id,
+            metadata: String::from_str(env, "auto-registered"),
+            governance_required: false,
+            deprecated: false,
+            min_trade_amount: 0,
+        };
+        env.storage().persistent().set(&MarketplaceDataKey::AssetConfig(asset_id), &cfg);
+        Self::append_registered_asset(env, asset_id);
+    }
+
+    fn append_registered_asset(env: &Env, asset_id: u64) {
+        let mut assets: Vec<u64> = env
+            .storage()
+            .instance()
+            .get(&MarketplaceDataKey::RegisteredAssets)
+            .unwrap_or(Vec::new(env));
+        for existing in assets.iter() {
+            if existing == asset_id {
+                return;
+            }
+        }
+        assets.push_back(asset_id);
+        env.storage().instance().set(&MarketplaceDataKey::RegisteredAssets, &assets);
+    }
+
+    fn append_audit_entry(env: &Env, actor: Address, action: Symbol, asset_id: u64, amount: i128) {
+        let mut entries: Vec<AuditTrailEntry> = env
+            .storage()
+            .persistent()
+            .get(&MarketplaceDataKey::AuditTrail)
+            .unwrap_or(Vec::new(env));
+        entries.push_back(AuditTrailEntry {
+            timestamp: env.ledger().timestamp(),
+            actor,
+            action,
+            asset_id,
+            amount,
+        });
+        env.storage().persistent().set(&MarketplaceDataKey::AuditTrail, &entries);
+    }
+
+    fn enforce_transfer_restrictions(
+        env: &Env,
+        user: &Address,
+        asset_id: u64,
+        amount: i128,
+        approval_id: Option<u64>,
+    ) {
+        let cfg = env
+            .storage()
+            .persistent()
+            .get::<_, TransferRestrictionConfig>(&MarketplaceDataKey::RestrictionConfig(asset_id));
+        if cfg.is_none() {
+            Self::track_holder(env, asset_id, user);
+            return;
+        }
+        let cfg = cfg.expect("restriction config exists");
+
+        if amount > cfg.max_transfer_amount {
+            Self::increment_failure(env, asset_id);
+            panic!("transfer exceeds limit");
+        }
+
+        if cfg.whitelist_required && !Self::is_whitelisted(env.clone(), asset_id, user.clone()) {
+            Self::increment_failure(env, asset_id);
+            panic!("user not whitelisted for restricted transfer");
+        }
+
+        let verified: bool = env
+            .storage()
+            .persistent()
+            .get(&MarketplaceDataKey::ComplianceVerified(asset_id, user.clone()))
+            .unwrap_or(false);
+        if !verified {
+            Self::increment_failure(env, asset_id);
+            panic!("compliance verification required");
+        }
+
+        let now = env.ledger().timestamp();
+        let lockup_until: u64 = env
+            .storage()
+            .persistent()
+            .get(&MarketplaceDataKey::LockupUntil(asset_id, user.clone()))
+            .unwrap_or(0);
+        if lockup_until > now {
+            Self::increment_failure(env, asset_id);
+            panic!("lock-up period active");
+        }
+
+        let first_held: u64 = env
+            .storage()
+            .persistent()
+            .get(&MarketplaceDataKey::FirstHeldAt(asset_id, user.clone()))
+            .unwrap_or(now);
+        if now < first_held + cfg.min_holding_seconds {
+            Self::increment_failure(env, asset_id);
+            panic!("minimum holding period not met");
+        }
+
+        if cfg.approval_required {
+            if approval_id.is_none() {
+                Self::increment_failure(env, asset_id);
+                panic!("transfer approval required");
+            }
+            let approved: bool = env
+                .storage()
+                .persistent()
+                .get(&MarketplaceDataKey::TransferApproved(approval_id.expect("checked")))
+                .unwrap_or(false);
+            if !approved {
+                Self::increment_failure(env, asset_id);
+                panic!("transfer approval required");
+            }
+        }
+
+        let day_bucket = now / 86_400;
+        let transferred_today: i128 = env
+            .storage()
+            .persistent()
+            .get(&MarketplaceDataKey::DailyTransfer(asset_id, user.clone(), day_bucket))
+            .unwrap_or(0);
+        let new_transferred = transferred_today + amount;
+        env.storage().persistent().set(
+            &MarketplaceDataKey::DailyTransfer(asset_id, user.clone(), day_bucket),
+            &new_transferred,
+        );
+
+        let restricted_count: u64 = env.storage().instance().get(&MarketplaceDataKey::RestrictedTransferCount(asset_id)).unwrap_or(0) + 1;
+        env.storage().instance().set(&MarketplaceDataKey::RestrictedTransferCount(asset_id), &restricted_count);
+        Self::track_holder(env, asset_id, user);
+    }
+
+    fn purchase_internal(
+        env: Env,
+        buyer: Address,
+        _listing_id: u64,
+        amount: i128,
+        asset_id: u64,
+        emergency_control_id: Address,
+        approval_id: Option<u64>,
+    ) -> bool {
+        buyer.require_auth();
+
+        let ec_client = EmergencyControlClient::new(&env, &emergency_control_id);
+        ec_client.require_not_paused(&asset_id, &PauseScope::Trading);
+
+        Self::require_whitelisted_if_private(&env, asset_id, &buyer);
+        Self::enforce_transfer_restrictions(&env, &buyer, asset_id, amount, approval_id);
+        Self::record_trade_metrics(&env, asset_id, &buyer, amount);
+
+        if env.storage().instance().has(&BuyBackDataKey::BuyBackConfigKey) {
+            let fee = Self::collect_fee(env.clone(), amount);
+            Self::credit_referral_reward(&env, &buyer, fee);
+        }
+
+        Self::append_audit_entry(&env, buyer, Symbol::new(&env, "purchase"), asset_id, amount);
+        true
+    }
+
+    fn track_holder(env: &Env, asset_id: u64, holder: &Address) {
+        if !env
+            .storage()
+            .persistent()
+            .get::<_, bool>(&MarketplaceDataKey::HolderSeen(asset_id, holder.clone()))
+            .unwrap_or(false)
+        {
+            env.storage()
+                .persistent()
+                .set(&MarketplaceDataKey::HolderSeen(asset_id, holder.clone()), &true);
+            let holders: u32 = env.storage().instance().get(&MarketplaceDataKey::HolderCount(asset_id)).unwrap_or(0) + 1;
+            env.storage().instance().set(&MarketplaceDataKey::HolderCount(asset_id), &holders);
+            env.storage()
+                .persistent()
+                .set(&MarketplaceDataKey::FirstHeldAt(asset_id, holder.clone()), &env.ledger().timestamp());
+        }
+    }
+
+    fn record_trade_metrics(env: &Env, asset_id: u64, buyer: &Address, amount: i128) {
+        let tx_count: u64 = env.storage().instance().get(&MarketplaceDataKey::TransactionCount(asset_id)).unwrap_or(0) + 1;
+        env.storage().instance().set(&MarketplaceDataKey::TransactionCount(asset_id), &tx_count);
+
+        let volume: i128 = env.storage().instance().get(&MarketplaceDataKey::Volume(asset_id)).unwrap_or(0) + amount;
+        env.storage().instance().set(&MarketplaceDataKey::Volume(asset_id), &volume);
+
+        let taxable_volume: i128 = env.storage().instance().get(&MarketplaceDataKey::TaxableVolume(asset_id)).unwrap_or(0) + amount;
+        env.storage().instance().set(&MarketplaceDataKey::TaxableVolume(asset_id), &taxable_volume);
+
+        Self::track_holder(env, asset_id, buyer);
+        Self::snapshot_compliance(env, asset_id);
+    }
+
+    fn build_snapshot(env: &Env, asset_id: u64) -> AssetComplianceSnapshot {
+        AssetComplianceSnapshot {
+            asset_id,
+            timestamp: env.ledger().timestamp(),
+            transaction_count: env.storage().instance().get(&MarketplaceDataKey::TransactionCount(asset_id)).unwrap_or(0),
+            volume: env.storage().instance().get(&MarketplaceDataKey::Volume(asset_id)).unwrap_or(0),
+            taxable_volume: env.storage().instance().get(&MarketplaceDataKey::TaxableVolume(asset_id)).unwrap_or(0),
+            holders: env.storage().instance().get(&MarketplaceDataKey::HolderCount(asset_id)).unwrap_or(0),
+            restricted_transfer_count: env.storage().instance().get(&MarketplaceDataKey::RestrictedTransferCount(asset_id)).unwrap_or(0),
+            compliance_failures: env.storage().instance().get(&MarketplaceDataKey::ComplianceFailures(asset_id)).unwrap_or(0),
+        }
+    }
+
+    fn snapshot_compliance(env: &Env, asset_id: u64) {
+        let snapshot = Self::build_snapshot(env, asset_id);
+        let mut history: Vec<AssetComplianceSnapshot> = env
+            .storage()
+            .persistent()
+            .get(&MarketplaceDataKey::ComplianceHistory(asset_id))
+            .unwrap_or(Vec::new(env));
+        history.push_back(snapshot);
+        env.storage().persistent().set(&MarketplaceDataKey::ComplianceHistory(asset_id), &history);
+    }
+
+    fn increment_failure(env: &Env, asset_id: u64) {
+        let failures: u64 = env.storage().instance().get(&MarketplaceDataKey::ComplianceFailures(asset_id)).unwrap_or(0) + 1;
+        env.storage().instance().set(&MarketplaceDataKey::ComplianceFailures(asset_id), &failures);
+    }
+
+    fn aggregate_metric_i128<F>(env: &Env, asset_id: Option<u64>, mut read: F) -> i128
+    where
+        F: FnMut(u64) -> i128,
+    {
+        if let Some(id) = asset_id {
+            return read(id);
+        }
+        let assets: Vec<u64> = env.storage().instance().get(&MarketplaceDataKey::RegisteredAssets).unwrap_or(Vec::new(env));
+        let mut total: i128 = 0;
+        for id in assets.iter() {
+            total += read(id);
+        }
+        total
+    }
+
+    fn aggregate_metric_u32<F>(env: &Env, asset_id: Option<u64>, mut read: F) -> u32
+    where
+        F: FnMut(u64) -> u32,
+    {
+        if let Some(id) = asset_id {
+            return read(id);
+        }
+        let assets: Vec<u64> = env.storage().instance().get(&MarketplaceDataKey::RegisteredAssets).unwrap_or(Vec::new(env));
+        let mut total: u32 = 0;
+        for id in assets.iter() {
+            total += read(id);
+        }
+        total
+    }
+
+    fn aggregate_metric_u64<F>(env: &Env, asset_id: Option<u64>, mut read: F) -> u64
+    where
+        F: FnMut(u64) -> u64,
+    {
+        if let Some(id) = asset_id {
+            return read(id);
+        }
+        let assets: Vec<u64> = env.storage().instance().get(&MarketplaceDataKey::RegisteredAssets).unwrap_or(Vec::new(env));
+        let mut total: u64 = 0;
+        for id in assets.iter() {
+            total += read(id);
+        }
+        total
+    }
+
+    fn validate_time_range(time_range: &Option<TimeRange>) -> Result<(), ComplianceError> {
         if let Some(range) = time_range {
             if range.start_timestamp > range.end_timestamp {
                 return Err(ComplianceError::InvalidTimeRange);
             }
         }
-        // Stub: count unique holders
-        Ok(0)
+        Ok(())
+    }
+
+    fn build_and_store_report(
+        env: &Env,
+        asset_id: Option<u64>,
+        time_range: Option<TimeRange>,
+        format: ReportFormat,
+    ) -> Result<u64, ComplianceError> {
+        Self::validate_time_range(&time_range)?;
+
+        let total_value = Self::get_total_tokenized_value(env.clone(), asset_id, time_range.clone())?;
+        let volume = Self::get_transaction_volume(env.clone(), asset_id, time_range.clone())?;
+        let taxable_volume = Self::get_taxable_volume(env.clone(), asset_id, time_range.clone())?;
+        let holders = Self::get_holder_count(env.clone(), asset_id, time_range)?;
+
+        let restricted_transfer_count = Self::aggregate_metric_u64(env, asset_id, |id| {
+            env.storage().instance().get(&MarketplaceDataKey::RestrictedTransferCount(id)).unwrap_or(0)
+        });
+
+        let report_id: u64 = env.storage().instance().get(&MarketplaceDataKey::ReportNonce).unwrap_or(0) + 1;
+        env.storage().instance().set(&MarketplaceDataKey::ReportNonce, &report_id);
+
+        let report = RegulatoryReport {
+            id: report_id,
+            generated_at: env.ledger().timestamp(),
+            asset_id,
+            format,
+            total_value,
+            volume,
+            taxable_volume,
+            holders,
+            restricted_transfer_count,
+        };
+
+        env.storage().persistent().set(&MarketplaceDataKey::GeneratedReport(report_id), &report);
+        env.events().publish((Symbol::new(env, "report_generated"), report_id), report.generated_at);
+        Ok(report_id)
+    }
+
+    fn require_admin_for_result(env: &Env, admin: &Address) -> Result<(), ComplianceError> {
+        admin.require_auth();
+        let stored_admin: Address = match env
+            .storage()
+            .instance()
+            .get(&MarketplaceDataKey::MarketplaceAdmin)
+        {
+            Some(v) => v,
+            None => return Err(ComplianceError::Unauthorized),
+        };
+        if *admin != stored_admin {
+            return Err(ComplianceError::Unauthorized);
+        }
+        Ok(())
     }
 }
 
@@ -1044,7 +1914,6 @@ impl Marketplace {
 #[cfg(test)]
 mod test {
     use super::*;
-    use soroban_sdk::vec;
     use crate::asset_token::{AssetToken, AssetTokenClient};
     use crate::emergency_control::{EmergencyControl, EmergencyControlClient, PauseScope};
     use crate::governance::{Governance, GovernanceClient};
@@ -1953,6 +2822,146 @@ mod test {
         
         let (_, reward, _) = mp_client.get_referral_info(&referrer);
         assert_eq!(reward, 0);
+    }
+
+    #[test]
+    fn test_multi_asset_registration_and_isolation() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let ec_id = env.register_contract(None, EmergencyControl);
+        let ec_client = EmergencyControlClient::new(&env, &ec_id);
+        let admin = Address::generate(&env);
+        ec_client.initialize(&admin);
+
+        let mp_id = env.register_contract(None, Marketplace);
+        let mp_client = MarketplaceClient::new(&env, &mp_id);
+        mp_client.initialize(&admin);
+
+        mp_client.register_asset(
+            &admin,
+            &101,
+            &String::from_str(&env, "asset-a"),
+            &false,
+            &1,
+        );
+        mp_client.register_asset(
+            &admin,
+            &202,
+            &String::from_str(&env, "asset-b"),
+            &false,
+            &1,
+        );
+
+        let seller_a = Address::generate(&env);
+        let seller_b = Address::generate(&env);
+        mp_client.create_listing(&seller_a, &101, &10, &50, &ec_id, &None);
+        mp_client.create_listing(&seller_b, &202, &20, &70, &ec_id, &None);
+
+        let a = mp_client.get_asset_analytics(&101);
+        let b = mp_client.get_asset_analytics(&202);
+        assert_eq!(a.asset_id, 101);
+        assert_eq!(b.asset_id, 202);
+        assert_eq!(a.listing_count, 1);
+        assert_eq!(b.listing_count, 1);
+        assert_ne!(a.volume, b.volume);
+    }
+
+    #[test]
+    fn test_transfer_restrictions_with_approval_flow() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let ec_id = env.register_contract(None, EmergencyControl);
+        let ec_client = EmergencyControlClient::new(&env, &ec_id);
+        let admin = Address::generate(&env);
+        ec_client.initialize(&admin);
+
+        let mp_id = env.register_contract(None, Marketplace);
+        let mp_client = MarketplaceClient::new(&env, &mp_id);
+        mp_client.initialize(&admin);
+
+        let asset_id = 404;
+        let buyer = Address::generate(&env);
+        let seller = Address::generate(&env);
+
+        mp_client.configure_transfer_restrictions(
+            &admin,
+            &asset_id,
+            &true,
+            &0,
+            &0,
+            &1_000,
+            &true,
+            &true,
+        );
+        mp_client.add_to_whitelist(&admin, &asset_id, &buyer);
+        mp_client.set_compliance_verified(&admin, &asset_id, &buyer, &true);
+        mp_client.create_listing(&seller, &asset_id, &10, &100, &ec_id, &None);
+
+        let req = mp_client.request_transfer_approval(
+            &buyer,
+            &buyer,
+            &asset_id,
+            &500,
+            &String::from_str(&env, "manual review"),
+        );
+        mp_client.review_transfer_approval(&admin, &req, &true);
+
+        let ok = mp_client.purchase_with_approval(&buyer, &1, &500, &asset_id, &req, &ec_id);
+        assert!(ok);
+        assert_eq!(mp_client.get_restricted_transfer_count(&asset_id), 1);
+    }
+
+    #[test]
+    fn test_compliance_reporting_export_and_scheduler() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let ec_id = env.register_contract(None, EmergencyControl);
+        let ec_client = EmergencyControlClient::new(&env, &ec_id);
+        let admin = Address::generate(&env);
+        ec_client.initialize(&admin);
+
+        let mp_id = env.register_contract(None, Marketplace);
+        let mp_client = MarketplaceClient::new(&env, &mp_id);
+        mp_client.initialize(&admin);
+
+        let asset_id = 777;
+        mp_client.register_asset(
+            &admin,
+            &asset_id,
+            &String::from_str(&env, "regulated-asset"),
+            &false,
+            &1,
+        );
+
+        let seller = Address::generate(&env);
+        let buyer = Address::generate(&env);
+        mp_client.create_listing(&seller, &asset_id, &10, &100, &ec_id, &None);
+        mp_client.purchase(&buyer, &1, &250, &asset_id, &ec_id);
+
+        let report_id = mp_client
+            .generate_regulatory_report(&admin, &Some(asset_id), &None, &ReportFormat::Csv);
+        let export = mp_client.export_report(&report_id);
+        match export {
+            ReportExport::Csv(r) => {
+                assert_eq!(r.asset_id, Some(asset_id));
+                assert!(r.volume >= 250);
+            }
+            _ => panic!("expected csv export"),
+        }
+
+        let schedule_id = mp_client
+            .schedule_report(&admin, &Some(asset_id), &60, &ReportFormat::Json);
+        assert_eq!(schedule_id, 1);
+
+        env.ledger().with_mut(|li| {
+            li.timestamp += 120;
+        });
+
+        let generated = mp_client.run_due_reports(&admin);
+        assert!(generated >= 1);
     }
 
     #[test]
