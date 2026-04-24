@@ -4,6 +4,7 @@ import (
 	"context"
 	"log"
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -12,10 +13,13 @@ import (
 	swaggerFiles "github.com/swaggo/files"
 	ginSwagger "github.com/swaggo/gin-swagger"
 	"github.com/ulule/limiter/v3"
+	"golang.org/x/time/rate"
 	_ "github.com/yourusername/kor-assetforge/docs"
 	"github.com/yourusername/kor-assetforge/config"
 	"github.com/yourusername/kor-assetforge/handlers"
+	"github.com/yourusername/kor-assetforge/handlers/auth"
 	"github.com/yourusername/kor-assetforge/middleware"
+	"github.com/yourusername/kor-assetforge/models"
 	"github.com/yourusername/kor-assetforge/services"
 	"github.com/yourusername/kor-assetforge/utils"
 	"github.com/yourusername/kor-assetforge/validator"
@@ -68,7 +72,8 @@ func main() {
 
 	// Warm common cache entries on startup
 	go cacheManager.Warm(context.Background(), config.WarmCacheEntries(db))
-	// Initialize Rate Limiter (e.g., 100 requests per minute)
+
+	// Initialize Redis-backed rate limiter (optional)
 	var rateLimiterMiddleware gin.HandlerFunc
 	if redisClient != nil {
 		rl, err := handlers.NewRateLimiter(redisClient, limiter.Rate{
@@ -81,6 +86,20 @@ func main() {
 			rateLimiterMiddleware = rl.Middleware()
 		}
 	}
+	_ = rateLimiterMiddleware // available for use on individual routes if needed
+
+	// Setup authentication
+	authConfig := &auth.AuthConfig{
+		JWTSecret:          getEnvOrDefault("JWT_SECRET", "your-super-secret-jwt-key-change-in-production"),
+		JWTExpirationHours: getEnvIntOrDefault("JWT_EXPIRATION_HOURS", 24),
+		RefreshTokenHours:  getEnvIntOrDefault("REFRESH_TOKEN_HOURS", 168),
+		EmailTokenHours:    getEnvIntOrDefault("EMAIL_TOKEN_HOURS", 24),
+		PasswordResetHours: getEnvIntOrDefault("PASSWORD_RESET_HOURS", 1),
+		BcryptCost:         getEnvIntOrDefault("BCRYPT_COST", 12),
+	}
+	authHandler := auth.NewAuthHandler(db, authConfig)
+	authMiddleware := auth.NewAuthMiddleware(authConfig.JWTSecret)
+	authRateLimiter := auth.NewAuthRateLimiter(rate.Limit(5.0/60.0), 10)
 
 	// Setup router
 	router := gin.New()
@@ -123,8 +142,34 @@ func main() {
 	// API v1 routes
 	v1 := router.Group("/api/v1")
 	{
+		// Authentication routes (public)
+		authGroup := v1.Group("/auth")
+		authGroup.Use(authRateLimiter.GeneralAuthRateLimit())
+		{
+			authGroup.POST("/register", authRateLimiter.RegisterRateLimit(), authHandler.Register)
+			authGroup.POST("/login", authRateLimiter.LoginRateLimit(), authHandler.Login)
+			authGroup.POST("/refresh", authHandler.RefreshToken)
+			authGroup.POST("/verify-email", authRateLimiter.EmailVerificationRateLimit(), authHandler.VerifyEmail)
+			authGroup.POST("/forgot-password", authRateLimiter.PasswordResetRateLimit(), authHandler.ForgotPassword)
+			authGroup.POST("/reset-password", authHandler.ResetPassword)
+		}
+
+		// Protected user routes
+		protected := v1.Group("")
+		protected.Use(authMiddleware.JWTAuth())
+		{
+			protected.GET("/profile", authHandler.GetProfile)
+			protected.POST("/logout", authHandler.Logout)
+
+			// Admin-only routes
+			admin := protected.Group("")
+			admin.Use(authMiddleware.RequireRole(models.RoleAdmin))
+			{
+				_ = admin // placeholder until admin routes are added
+			}
+		}
+
 		// Asset routes (with write-through cache invalidation)
-		// Asset routes
 		assetHandler := handlers.NewAssetHandler(db, stellarClient, redisClient)
 		v1.POST("/assets/tokenize",
 			middleware.InvalidateOnWrite(cacheManager, "kor:asset:*"),
@@ -190,4 +235,20 @@ func main() {
 	if err := router.Run(":" + port); err != nil {
 		log.Fatalf("Failed to start server: %v", err)
 	}
+}
+
+func getEnvOrDefault(key, defaultValue string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return defaultValue
+}
+
+func getEnvIntOrDefault(key string, defaultValue int) int {
+	if v := os.Getenv(key); v != "" {
+		if i, err := strconv.Atoi(v); err == nil {
+			return i
+		}
+	}
+	return defaultValue
 }

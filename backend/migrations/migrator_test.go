@@ -1,0 +1,73 @@
+package migrations_test
+
+import (
+	"database/sql"
+	"testing"
+
+	_ "github.com/jackc/pgx/v5/stdlib"
+	"github.com/yourusername/kor-assetforge/migrations"
+)
+
+// openTestDB connects to the test database from DATABASE_URL env.
+// If DATABASE_URL is not set the test is skipped.
+func openTestDB(t *testing.T) *sql.DB {
+	t.Helper()
+	dsn := "host=localhost user=postgres password=password dbname=assetforge_test port=5432 sslmode=disable"
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Skipf("cannot open test database: %v", err)
+	}
+	if err := db.Ping(); err != nil {
+		db.Close()
+		t.Skipf("test database not reachable: %v", err)
+	}
+	return db
+}
+
+func TestMigratorUpAndDown(t *testing.T) {
+	db := openTestDB(t)
+	defer db.Close()
+
+	m := migrations.New(db)
+
+	// Apply all migrations
+	if err := m.Up(); err != nil {
+		t.Fatalf("Up() error: %v", err)
+	}
+
+	v, err := m.Version()
+	if err != nil {
+		t.Fatalf("Version() error: %v", err)
+	}
+	if v == 0 {
+		t.Fatal("expected version > 0 after Up()")
+	}
+
+	// Roll back all
+	if err := m.Down(0); err != nil {
+		t.Fatalf("Down(0) error: %v", err)
+	}
+
+	v2, err := m.Version()
+	if err != nil {
+		t.Fatalf("Version() after Down error: %v", err)
+	}
+	if v2 != 0 {
+		t.Fatalf("expected version 0 after Down(0), got %d", v2)
+	}
+}
+
+func TestMigratorIdempotent(t *testing.T) {
+	db := openTestDB(t)
+	defer db.Close()
+
+	m := migrations.New(db)
+
+	if err := m.Up(); err != nil {
+		t.Fatalf("first Up() error: %v", err)
+	}
+	// Running Up again should be a no-op
+	if err := m.Up(); err != nil {
+		t.Fatalf("second Up() error: %v", err)
+	}
+}

@@ -1,41 +1,58 @@
 package config
 
 import (
+	"database/sql"
 	"fmt"
 	"os"
 	"time"
 
+	_ "github.com/jackc/pgx/v5/stdlib"
+	"github.com/yourusername/kor-assetforge/migrations"
 	"github.com/yourusername/kor-assetforge/models"
 	"github.com/yourusername/kor-assetforge/utils"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 )
 
-// InitDB initializes the database connection and auto-migrates all models.
+// InitDB initializes the database connection, runs SQL migrations, then GORM AutoMigrate.
 func InitDB() (*gorm.DB, error) {
 	dsn := os.Getenv("DATABASE_URL")
 	if dsn == "" {
 		dsn = "host=localhost user=postgres password=password dbname=assetforge port=5432 sslmode=disable"
 	}
 
+	// Run versioned SQL migrations first
+	rawDB, err := sql.Open("pgx", dsn)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open database: %w", err)
+	}
+	defer rawDB.Close()
+
+	if err := migrations.New(rawDB).Up(); err != nil {
+		return nil, fmt.Errorf("failed to apply migrations: %w", err)
+	}
+
+	// Open GORM connection for the rest of the application
 	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to database: %w", err)
 	}
 
+	// GORM AutoMigrate handles columns added after the initial SQL migration
 	if err := db.AutoMigrate(
 		&models.Asset{},
 		&models.Listing{},
 		&models.Transaction{},
 		&models.User{},
 		&models.UserBalance{},
+		&models.UserSession{},
 		// KYC / AML models (#55)
 		&models.KYCRecord{},
 		&models.KYCDocument{},
 		&models.AMLScreening{},
 		&models.ComplianceAuditLog{},
 	); err != nil {
-		return nil, fmt.Errorf("failed to migrate database: %w", err)
+		return nil, fmt.Errorf("failed to auto-migrate models: %w", err)
 	}
 
 	return db, nil

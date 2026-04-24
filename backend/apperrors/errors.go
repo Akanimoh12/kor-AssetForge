@@ -16,6 +16,9 @@ const (
 	CodeDatabaseError        ErrorCode = "database_error"
 	CodeExternalServiceError ErrorCode = "external_service_error"
 	CodeUnauthorized         ErrorCode = "unauthorized"
+	CodeForbidden            ErrorCode = "forbidden"
+	CodeConflict             ErrorCode = "conflict"
+	CodeTooManyRequests      ErrorCode = "too_many_requests"
 )
 
 type AppError struct {
@@ -104,4 +107,44 @@ func FormatErrorResponse(err *AppError, requestID string, debug bool) ErrorRespo
 	}
 
 	return resp
+}
+
+func NewValidationError(message string, err error) *AppError {
+	return Wrap(err, CodeValidationFailed, message, http.StatusBadRequest)
+}
+
+func NewBadRequestError(message string) *AppError {
+	return New(CodeBadRequest, message, http.StatusBadRequest)
+}
+
+func NewNotFoundError(message string) *AppError {
+	return New(CodeNotFound, message, http.StatusNotFound)
+}
+
+func NewUnauthorizedError(message string) *AppError {
+	return New(CodeUnauthorized, message, http.StatusUnauthorized)
+}
+
+func NewForbiddenError(message string) *AppError {
+	return New(CodeForbidden, message, http.StatusForbidden)
+}
+
+func NewConflictError(message string) *AppError {
+	return New(CodeConflict, message, http.StatusConflict)
+}
+
+func NewInternalError(message string) *AppError {
+	return New(CodeInternalServerError, message, http.StatusInternalServerError)
+}
+
+func NewTooManyRequestsError(message string) *AppError {
+	return New(CodeTooManyRequests, message, http.StatusTooManyRequests)
+}
+
+func NewDatabaseError(message string, err error) *AppError {
+	return Wrap(err, CodeDatabaseError, message, http.StatusInternalServerError)
+}
+
+func NewExternalServiceError(message string, err error) *AppError {
+	return Wrap(err, CodeExternalServiceError, message, http.StatusBadGateway)
 }
