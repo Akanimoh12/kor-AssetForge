@@ -427,6 +427,9 @@ impl AssetToken {
         let supply = Self::total_supply(env.clone());
         env.storage().instance().set(&DataKey::TotalSupply, &(supply + amount));
 
+        // Record transaction
+        Self::record_transaction(&env, TransactionType::Mint, asset.owner.clone(), Some(to.clone()), amount, asset_id, 0);
+
         env.events().publish((Symbol::new(&env, "mint"), to), amount);
     }
 
@@ -458,6 +461,9 @@ impl AssetToken {
 
         env.storage().persistent().set(&DataKey::Balance(from.clone()), &from_balance);
         env.storage().persistent().set(&DataKey::Balance(to.clone()), &to_balance);
+
+        // Record transaction
+        Self::record_transaction(&env, TransactionType::Transfer, from.clone(), Some(to.clone()), amount, asset_id, 0);
 
         env.events().publish((Symbol::new(&env, "transfer"), from, to), amount);
     }
@@ -1180,11 +1186,14 @@ impl AssetToken {
         
         env.storage().persistent().set(&DataKey::Balance(from.clone()), &balance);
         env.storage().persistent().set(&DataKey::Staked(from.clone()), &staked_data);
-        
-        let mut total_staked: i128 = env.storage().instance().get(&DataKey::TotalStaked).unwrap_or(0);
-        total_staked += amount;
-        env.storage().instance().set(&DataKey::TotalStaked, &total_staked);
-        
+
+        let total_staked = env.storage().instance().get(&DataKey::TotalStaked).unwrap_or(0);
+        env.storage().instance().set(&DataKey::TotalStaked, &(total_staked + amount));
+
+        // Record transaction
+        let asset: Asset = env.storage().instance().get(&DataKey::AssetInfo).expect("Asset not initialized");
+        Self::record_transaction(&env, TransactionType::Stake, from.clone(), None, amount, asset.id, 0);
+
         env.events().publish((Symbol::new(&env, "tokens_staked"), from), amount);
     }
 
@@ -1217,12 +1226,15 @@ impl AssetToken {
         } else {
             env.storage().persistent().set(&DataKey::Staked(from.clone()), &staked_data);
         }
-        
-        let mut total_staked: i128 = env.storage().instance().get(&DataKey::TotalStaked).unwrap_or(0);
-        total_staked -= amount;
-        env.storage().instance().set(&DataKey::TotalStaked, &total_staked);
-        
-        env.events().publish((Symbol::new(&env, "yields_claimed"), from), total_yield);
+
+        let total_staked = env.storage().instance().get(&DataKey::TotalStaked).unwrap_or(0);
+        env.storage().instance().set(&DataKey::TotalStaked, &(total_staked - amount));
+
+        // Record transaction
+        let asset: Asset = env.storage().instance().get(&DataKey::AssetInfo).expect("Asset not initialized");
+        Self::record_transaction(&env, TransactionType::Unstake, from.clone(), None, amount, asset.id, 0);
+
+        env.events().publish((Symbol::new(&env, "unstaked"), from), amount);
     }
     
     pub fn get_staked(env: Env, address: Address) -> Option<Staked> {
@@ -1981,5 +1993,195 @@ mod test {
         
         let unclaimed = client.calculate_unclaimed_dividends(&distribution_id);
         assert_eq!(unclaimed, 100000);
+    }
+
+    // Transaction Analytics System Tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_transaction_tracking() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, ec_id) = setup(&env);
+        
+        let user = Address::generate(&env);
+        
+        // Perform a transfer
+        client.transfer(&admin, &user, &1000, &1, &ec_id);
+        
+        // Check that transaction was recorded
+        let user_txs = client.get_user_transactions(&user);
+        assert_eq!(user_txs.len(), 1);
+        
+        let tx = client.get_transaction(&user_txs.get(0).unwrap()).unwrap();
+        assert_eq!(tx.transaction_type, TransactionType::Transfer);
+        assert_eq!(tx.amount, 1000);
+    }
+
+    #[test]
+    fn test_transaction_analytics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, ec_id) = setup(&env);
+        
+        let user1 = Address::generate(&env);
+        let user2 = Address::generate(&env);
+        
+        // Perform some transactions
+        client.transfer(&admin, &user1, &1000, &1, &ec_id);
+        client.transfer(&admin, &user2, &2000, &1, &ec_id);
+        
+        // Get analytics
+        let analytics = client.get_transaction_analytics(&0, &u64::MAX);
+        assert_eq!(analytics.total_transactions, 2);
+        assert_eq!(analytics.total_volume, 3000);
+        assert!(analytics.unique_addresses >= 2);
+    }
+
+    #[test]
+    fn test_volume_history() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, ec_id) = setup(&env);
+        
+        let user = Address::generate(&env);
+        
+        // Perform transactions
+        client.transfer(&admin, &user, &1000, &1, &ec_id);
+        client.transfer(&admin, &user, &2000, &1, &ec_id);
+        
+        // Get volume history
+        let volume = client.get_volume_history(&0, &u64::MAX);
+        assert!(volume.len() > 0);
+    }
+
+    #[test]
+    fn test_transaction_stats_by_type() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, ec_id) = setup(&env);
+        
+        let user = Address::generate(&env);
+        
+        // Perform different transaction types
+        client.transfer(&admin, &user, &1000, &1, &ec_id);
+        client.mint(&user, &500, &1, &ec_id);
+        
+        // Get stats by type
+        let stats = client.get_transaction_stats_by_type(&0, &u64::MAX);
+        assert!(stats.len() > 0);
+        
+        // Find transfer stats
+        let transfer_stat = stats.iter().find(|(tx_type, _, _)| *tx_type == TransactionType::Transfer);
+        assert!(transfer_stat.is_some());
+    }
+
+    #[test]
+    fn test_export_transactions() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, ec_id) = setup(&env);
+        
+        let user = Address::generate(&env);
+        
+        // Perform transactions
+        client.transfer(&admin, &user, &1000, &1, &ec_id);
+        
+        // Export transactions
+        let records = client.export_transactions(&Some(user), &None, &0, &u64::MAX);
+        assert_eq!(records.len(), 1);
+        assert_eq!(records.get(0).unwrap().transaction_type, TransactionType::Transfer);
+    }
+
+    #[test]
+    fn test_price_history_recording() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, _ec_id) = setup(&env);
+        
+        // Record price
+        client.record_price(&1000, &5000);
+        
+        // Get price history (returns empty in placeholder implementation)
+        let prices = client.get_price_history(&0, &u64::MAX);
+        // Placeholder returns empty
+        assert_eq!(prices.len(), 0);
+    }
+
+    #[test]
+    fn test_asset_transaction_history() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, ec_id) = setup(&env);
+        
+        let user = Address::generate(&env);
+        
+        // Perform transactions for asset_id 1
+        client.transfer(&admin, &user, &1000, &1, &ec_id);
+        client.transfer(&admin, &user, &2000, &1, &ec_id);
+        
+        // Get asset transactions
+        let asset_txs = client.get_asset_transactions(&1);
+        assert!(asset_txs.len() >= 2);
+    }
+
+    #[test]
+    fn test_mint_transaction_tracking() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, ec_id) = setup(&env);
+        
+        let user = Address::generate(&env);
+        
+        // Mint tokens
+        client.mint(&user, &1000, &1, &ec_id);
+        
+        // Check transaction was recorded
+        let user_txs = client.get_user_transactions(&admin);
+        assert!(user_txs.len() > 0);
+        
+        let tx = client.get_transaction(&user_txs.get(0).unwrap()).unwrap();
+        assert_eq!(tx.transaction_type, TransactionType::Mint);
+    }
+
+    #[test]
+    fn test_stake_transaction_tracking() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _ec_id) = setup(&env);
+        
+        // Stake tokens
+        client.stake_tokens(&admin, &1000);
+        
+        // Check transaction was recorded
+        let user_txs = client.get_user_transactions(&admin);
+        assert!(user_txs.len() > 0);
+        
+        let tx = client.get_transaction(&user_txs.get(0).unwrap()).unwrap();
+        assert_eq!(tx.transaction_type, TransactionType::Stake);
+    }
+
+    #[test]
+    fn test_unstake_transaction_tracking() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _ec_id) = setup(&env);
+        
+        // Stake first
+        client.stake_tokens(&admin, &1000);
+        
+        // Unstake tokens
+        client.unstake_tokens(&admin, &500);
+        
+        // Check transaction was recorded
+        let user_txs = client.get_user_transactions(&admin);
+        assert!(user_txs.len() > 1);
+        
+        // Find unstake transaction
+        let unstake_tx = user_txs.iter().find(|tx_id| {
+            let tx = client.get_transaction(tx_id).unwrap();
+            tx.transaction_type == TransactionType::Unstake
+        });
+        assert!(unstake_tx.is_some());
     }
 }
