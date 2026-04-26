@@ -1680,15 +1680,36 @@
               },
               {
                 "u64": 1
+              },
+              {
+                "u64": 1
               }
             ],
             "data": {
-              "vec": [
+              "map": [
                 {
-                  "u64": 1
+                  "key": {
+                    "symbol": "end_time"
+                  },
+                  "val": {
+                    "u64": 3600
+                  }
                 },
                 {
-                  "u64": 3600
+                  "key": {
+                    "symbol": "proposer"
+                  },
+                  "val": {
+                    "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAK3IM"
+                  }
+                },
+                {
+                  "key": {
+                    "symbol": "version"
+                  },
+                  "val": {
+                    "u32": 1
+                  }
                 }
               ]
             }

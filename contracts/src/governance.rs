@@ -1,6 +1,9 @@
-use soroban_sdk::{contract, contractimpl, contracttype, Address, Env, String, Symbol};
+use soroban_sdk::{contract, contractimpl, contracttype, Address, Env, String, Symbol, Vec};
 
 use crate::asset_token::AssetTokenClient;
+use crate::events::{
+    DelegationEvent, ProposalCreatedEvent, ProposalFinalizedEvent, VoteCastEvent, EVENT_VERSION,
+};
 
 // ---------------------------------------------------------------------------
 // Storage Keys
@@ -29,6 +32,12 @@ pub enum GovDataKey {
     Depositor(u64),
     /// Quorum threshold (minimum total votes for a proposal to be valid)
     Quorum,
+    /// Delegation: delegator address -> delegatee address
+    Delegate(Address),
+    /// Delegation: delegatee address -> Vec<Address> of all delegators
+    DelegatorsOf(Address),
+    /// Maximum number of delegators allowed per delegatee (instance-level setting)
+    DelegationLimit,
 }
 
 // ---------------------------------------------------------------------------
@@ -192,10 +201,14 @@ impl Governance {
             .persistent()
             .set(&GovDataKey::Snapshot(proposal_id, proposer.clone()), &balance);
 
-        // Emit event
+        // Emit event – topic includes asset_id for multi-dimensional index filtering
         env.events().publish(
-            (Symbol::new(&env, "proposal_created"), proposal_id),
-            (asset_id, end_time),
+            (Symbol::new(&env, "proposal_created"), proposal_id, asset_id),
+            ProposalCreatedEvent {
+                version: EVENT_VERSION,
+                proposer: proposer.clone(),
+                end_time,
+            },
         );
 
         proposal_id
@@ -247,13 +260,36 @@ impl Governance {
             .get(&GovDataKey::TokenContract)
             .expect("not initialized");
         let token_client = AssetTokenClient::new(&env, &token_addr);
-        let weight = token_client.balance(&voter);
+        let own_balance = token_client.balance(&voter);
 
-        if weight <= 0 {
+        // Prevent voting if the voter has delegated their power to someone else
+        if env
+            .storage()
+            .persistent()
+            .has(&GovDataKey::Delegate(voter.clone()))
+        {
+            panic!("voting power has been delegated; your delegate must vote");
+        }
+
+        if own_balance <= 0 {
             panic!("insufficient tokens to vote");
         }
 
-        // Record snapshot
+        // Aggregate delegated power from all delegators who delegated to this voter
+        let delegators: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&GovDataKey::DelegatorsOf(voter.clone()))
+            .unwrap_or(Vec::new(&env));
+        let mut weight: i128 = own_balance;
+        for delegator in delegators.iter() {
+            let d_bal = token_client.balance(&delegator);
+            if d_bal > 0 {
+                weight = weight.checked_add(d_bal).expect("vote overflow");
+            }
+        }
+
+        // Record snapshot (includes delegated power)
         env.storage()
             .persistent()
             .set(&GovDataKey::Snapshot(proposal_id, voter.clone()), &weight);
@@ -284,7 +320,12 @@ impl Governance {
         // Emit event
         env.events().publish(
             (Symbol::new(&env, "vote_cast"), proposal_id),
-            (voter, vote_yes, weight),
+            VoteCastEvent {
+                version: EVENT_VERSION,
+                voter,
+                vote_yes,
+                weight,
+            },
         );
     }
 
@@ -326,18 +367,26 @@ impl Governance {
                 .persistent()
                 .set(&GovDataKey::Approved(proposal.asset_id), &true);
 
-            // Emit execution event
+            // Emit execution event – asset_id in topics for direct asset-based queries
             env.events().publish(
-                (Symbol::new(&env, "proposal_executed"), proposal_id),
-                proposal.asset_id,
+                (Symbol::new(&env, "proposal_executed"), proposal_id, proposal.asset_id),
+                ProposalFinalizedEvent {
+                    version: EVENT_VERSION,
+                    votes_for: proposal.votes_for,
+                    votes_against: proposal.votes_against,
+                },
             );
         } else {
             proposal.status = ProposalStatus::Rejected;
 
             // Emit rejection event
             env.events().publish(
-                (Symbol::new(&env, "proposal_rejected"), proposal_id),
-                proposal.asset_id,
+                (Symbol::new(&env, "proposal_rejected"), proposal_id, proposal.asset_id),
+                ProposalFinalizedEvent {
+                    version: EVENT_VERSION,
+                    votes_for: proposal.votes_for,
+                    votes_against: proposal.votes_against,
+                },
             );
         }
 
@@ -386,6 +435,199 @@ impl Governance {
             .persistent()
             .get(&GovDataKey::Snapshot(proposal_id, voter))
             .unwrap_or(0)
+    }
+
+    // -----------------------------------------------------------------------
+    // Delegation – Issue #70
+    // -----------------------------------------------------------------------
+
+    /// Set the maximum number of delegators a single delegatee may accept.
+    /// Defaults to 20 if never configured.
+    pub fn set_delegation_limit(env: Env, admin: Address, limit: u32) {
+        Self::require_admin(&env, &admin);
+        env.storage()
+            .instance()
+            .set(&GovDataKey::DelegationLimit, &limit);
+    }
+
+    /// Delegate the caller's voting power to `delegatee`.
+    ///
+    /// Rules enforced:
+    /// - Cannot delegate to self.
+    /// - Cannot delegate if already delegated (revoke first).
+    /// - Cannot delegate to someone who has themselves delegated (prevents
+    ///   multi-level / circular chains).
+    /// - Delegation limit per delegatee must not be exceeded.
+    pub fn delegate(env: Env, delegator: Address, delegatee: Address) {
+        delegator.require_auth();
+
+        if delegator == delegatee {
+            panic!("cannot delegate to self");
+        }
+
+        // Multi-level prevention: delegatee must not itself have an active delegation
+        if env
+            .storage()
+            .persistent()
+            .has(&GovDataKey::Delegate(delegatee.clone()))
+        {
+            panic!("delegatee has already delegated; multi-level delegation not allowed");
+        }
+
+        // Prevent double-delegation without explicit revocation
+        if env
+            .storage()
+            .persistent()
+            .has(&GovDataKey::Delegate(delegator.clone()))
+        {
+            panic!("already delegated; revoke existing delegation first");
+        }
+
+        // Enforce per-delegatee limit
+        let limit: u32 = env
+            .storage()
+            .instance()
+            .get(&GovDataKey::DelegationLimit)
+            .unwrap_or(20);
+        let mut delegators: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&GovDataKey::DelegatorsOf(delegatee.clone()))
+            .unwrap_or(Vec::new(&env));
+        if delegators.len() >= limit {
+            panic!("delegation limit reached for this delegatee");
+        }
+
+        // Store delegation
+        env.storage()
+            .persistent()
+            .set(&GovDataKey::Delegate(delegator.clone()), &delegatee);
+        delegators.push_back(delegator.clone());
+        env.storage()
+            .persistent()
+            .set(&GovDataKey::DelegatorsOf(delegatee.clone()), &delegators);
+
+        env.events().publish(
+            (Symbol::new(&env, "delegate_set"), delegator.clone()),
+            DelegationEvent {
+                version: EVENT_VERSION,
+                delegatee,
+                timestamp: env.ledger().timestamp(),
+            },
+        );
+    }
+
+    /// Revoke the caller's active delegation, restoring their direct voting
+    /// ability.
+    pub fn revoke_delegation(env: Env, delegator: Address) {
+        delegator.require_auth();
+        Self::revoke_delegation_internal(&env, &delegator);
+    }
+
+    /// Emergency delegation removal by the contract admin.
+    ///
+    /// Use when a delegator is unresponsive and needs to be unblocked.
+    pub fn revoke_delegation_admin(env: Env, admin: Address, delegator: Address) {
+        Self::require_admin(&env, &admin);
+        Self::revoke_delegation_internal(&env, &delegator);
+        env.events().publish(
+            (Symbol::new(&env, "delegation_admin_removed"), delegator),
+            env.ledger().timestamp(),
+        );
+    }
+
+    /// Return the current delegatee for `delegator`, if any.
+    pub fn get_delegate(env: Env, delegator: Address) -> Option<Address> {
+        env.storage()
+            .persistent()
+            .get(&GovDataKey::Delegate(delegator))
+    }
+
+    /// Return the list of addresses that have delegated to `delegatee`.
+    pub fn get_delegators(env: Env, delegatee: Address) -> Vec<Address> {
+        env.storage()
+            .persistent()
+            .get(&GovDataKey::DelegatorsOf(delegatee))
+            .unwrap_or(Vec::new(&env))
+    }
+
+    /// Return the sum of token balances of every delegator currently
+    /// delegating to `delegatee`.
+    pub fn get_delegated_power(env: Env, delegatee: Address) -> i128 {
+        let token_addr: Address = env
+            .storage()
+            .instance()
+            .get(&GovDataKey::TokenContract)
+            .expect("not initialized");
+        let token_client = AssetTokenClient::new(&env, &token_addr);
+
+        let delegators: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&GovDataKey::DelegatorsOf(delegatee))
+            .unwrap_or(Vec::new(&env));
+
+        let mut total: i128 = 0;
+        for delegator in delegators.iter() {
+            total = total
+                .checked_add(token_client.balance(&delegator))
+                .expect("overflow");
+        }
+        total
+    }
+
+    // -----------------------------------------------------------------------
+    // Internal helpers
+    // -----------------------------------------------------------------------
+
+    fn require_admin(env: &Env, caller: &Address) {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&GovDataKey::Admin)
+            .expect("not initialized");
+        if *caller != admin {
+            panic!("admin only");
+        }
+        caller.require_auth();
+    }
+
+    fn revoke_delegation_internal(env: &Env, delegator: &Address) {
+        let delegatee: Address = env
+            .storage()
+            .persistent()
+            .get(&GovDataKey::Delegate(delegator.clone()))
+            .expect("no active delegation");
+
+        // Remove delegator from the delegatee's list
+        let existing: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&GovDataKey::DelegatorsOf(delegatee.clone()))
+            .unwrap_or(Vec::new(env));
+        let mut updated = Vec::new(env);
+        for d in existing.iter() {
+            if d != *delegator {
+                updated.push_back(d);
+            }
+        }
+        env.storage()
+            .persistent()
+            .set(&GovDataKey::DelegatorsOf(delegatee.clone()), &updated);
+
+        // Remove the delegation record
+        env.storage()
+            .persistent()
+            .remove(&GovDataKey::Delegate(delegator.clone()));
+
+        env.events().publish(
+            (Symbol::new(env, "delegation_revoked"), delegator.clone()),
+            DelegationEvent {
+                version: EVENT_VERSION,
+                delegatee,
+                timestamp: env.ledger().timestamp(),
+            },
+        );
     }
 }
 
@@ -855,7 +1097,166 @@ mod test {
     }
 
     // -----------------------------------------------------------------------
-    // 6. Multiple voters, weighted tally
+    // 6. Delegation
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_delegate_and_vote_with_delegated_power() {
+        let (env, gov_id, at_id, ec_id, _admin) = setup();
+        let client = GovernanceClient::new(&env, &gov_id);
+
+        let proposer = Address::generate(&env);
+        let delegator = Address::generate(&env);
+        let delegatee = Address::generate(&env);
+
+        mint_tokens(&env, &at_id, &ec_id, &proposer, 200);
+        mint_tokens(&env, &at_id, &ec_id, &delegator, 60);
+        mint_tokens(&env, &at_id, &ec_id, &delegatee, 40);
+
+        // delegator delegates to delegatee
+        client.delegate(&delegator, &delegatee);
+        assert_eq!(client.get_delegate(&delegator), Some(delegatee.clone()));
+
+        let pid = client.create_proposal(
+            &proposer,
+            &1,
+            &String::from_str(&env, "Delegation test"),
+            &3600,
+        );
+
+        // delegatee votes; weight = own 40 + delegated 60 = 100
+        client.vote(&delegatee, &pid, &true);
+        let p = client.get_proposal(&pid).unwrap();
+        assert_eq!(p.votes_for, 100);
+    }
+
+    #[test]
+    #[should_panic(expected = "voting power has been delegated")]
+    fn test_delegator_cannot_vote() {
+        let (env, gov_id, at_id, ec_id, _admin) = setup();
+        let client = GovernanceClient::new(&env, &gov_id);
+
+        let proposer = Address::generate(&env);
+        let delegator = Address::generate(&env);
+        let delegatee = Address::generate(&env);
+
+        mint_tokens(&env, &at_id, &ec_id, &proposer, 200);
+        mint_tokens(&env, &at_id, &ec_id, &delegator, 100);
+        mint_tokens(&env, &at_id, &ec_id, &delegatee, 50);
+
+        client.delegate(&delegator, &delegatee);
+
+        let pid = client.create_proposal(
+            &proposer,
+            &1,
+            &String::from_str(&env, "Delegator vote blocked"),
+            &3600,
+        );
+
+        client.vote(&delegator, &pid, &true); // must panic
+    }
+
+    #[test]
+    #[should_panic(expected = "cannot delegate to self")]
+    fn test_cannot_delegate_to_self() {
+        let (env, gov_id, at_id, ec_id, _admin) = setup();
+        let client = GovernanceClient::new(&env, &gov_id);
+        let user = Address::generate(&env);
+        mint_tokens(&env, &at_id, &ec_id, &user, 100);
+        client.delegate(&user, &user);
+    }
+
+    #[test]
+    #[should_panic(expected = "multi-level delegation not allowed")]
+    fn test_multi_level_delegation_prevented() {
+        let (env, gov_id, at_id, ec_id, _admin) = setup();
+        let client = GovernanceClient::new(&env, &gov_id);
+
+        let a = Address::generate(&env);
+        let b = Address::generate(&env);
+        let c = Address::generate(&env);
+
+        mint_tokens(&env, &at_id, &ec_id, &a, 100);
+        mint_tokens(&env, &at_id, &ec_id, &b, 100);
+        mint_tokens(&env, &at_id, &ec_id, &c, 100);
+
+        // b delegates to c
+        client.delegate(&b, &c);
+        // a tries to delegate to b (who already delegated) – must panic
+        client.delegate(&a, &b);
+    }
+
+    #[test]
+    fn test_revoke_delegation_restores_vote() {
+        let (env, gov_id, at_id, ec_id, _admin) = setup();
+        let client = GovernanceClient::new(&env, &gov_id);
+
+        let proposer = Address::generate(&env);
+        let delegator = Address::generate(&env);
+        let delegatee = Address::generate(&env);
+
+        mint_tokens(&env, &at_id, &ec_id, &proposer, 200);
+        mint_tokens(&env, &at_id, &ec_id, &delegator, 80);
+        mint_tokens(&env, &at_id, &ec_id, &delegatee, 20);
+
+        client.delegate(&delegator, &delegatee);
+        client.revoke_delegation(&delegator);
+
+        assert_eq!(client.get_delegate(&delegator), None);
+        // delegated power of delegatee is now 0
+        assert_eq!(client.get_delegated_power(&delegatee), 0);
+
+        let pid = client.create_proposal(
+            &proposer,
+            &1,
+            &String::from_str(&env, "After revoke"),
+            &3600,
+        );
+
+        // delegator can now vote directly
+        client.vote(&delegator, &pid, &true);
+        let p = client.get_proposal(&pid).unwrap();
+        assert_eq!(p.votes_for, 80);
+    }
+
+    #[test]
+    fn test_get_delegators_list() {
+        let (env, gov_id, at_id, ec_id, _admin) = setup();
+        let client = GovernanceClient::new(&env, &gov_id);
+
+        let delegatee = Address::generate(&env);
+        let d1 = Address::generate(&env);
+        let d2 = Address::generate(&env);
+
+        mint_tokens(&env, &at_id, &ec_id, &d1, 50);
+        mint_tokens(&env, &at_id, &ec_id, &d2, 50);
+        mint_tokens(&env, &at_id, &ec_id, &delegatee, 10);
+
+        client.delegate(&d1, &delegatee);
+        client.delegate(&d2, &delegatee);
+
+        let list = client.get_delegators(&delegatee);
+        assert_eq!(list.len(), 2);
+    }
+
+    #[test]
+    fn test_admin_emergency_delegation_removal() {
+        let (env, gov_id, at_id, ec_id, admin) = setup();
+        let client = GovernanceClient::new(&env, &gov_id);
+
+        let delegator = Address::generate(&env);
+        let delegatee = Address::generate(&env);
+        mint_tokens(&env, &at_id, &ec_id, &delegator, 100);
+        mint_tokens(&env, &at_id, &ec_id, &delegatee, 50);
+
+        client.delegate(&delegator, &delegatee);
+        client.revoke_delegation_admin(&admin, &delegator);
+
+        assert_eq!(client.get_delegate(&delegator), None);
+    }
+
+    // -----------------------------------------------------------------------
+    // 7. Multiple voters, weighted tally
     // -----------------------------------------------------------------------
 
     #[test]
