@@ -396,9 +396,9 @@ impl AssetToken {
             for (owner_addr, share_count) in owners.iter() {
                 total_distributed += share_count;
                 assert!(total_distributed <= fractions, "exceeds fractions");
-                let balance = (share_count as i128) * unit_value;
+                let balance = (share_count as i128).checked_mul(unit_value).unwrap();
                 let current: i128 = env.storage().persistent().get(&DataKey::Balance(owner_addr.clone())).unwrap_or(0);
-                env.storage().persistent().set(&DataKey::Balance(owner_addr), &(current + balance));
+                env.storage().persistent().set(&DataKey::Balance(owner_addr), &(current.checked_add(balance).unwrap()));
             }
         }
 
@@ -414,6 +414,7 @@ impl AssetToken {
     }
 
     pub fn mint(env: Env, to: Address, amount: i128, asset_id: u64, emergency_control_id: Address) {
+        assert!(amount > 0, "amount must be positive");
         let asset: Asset = env.storage().instance().get(&DataKey::AssetInfo).expect("Asset not initialized");
         asset.owner.require_auth();
 
@@ -425,7 +426,7 @@ impl AssetToken {
         env.storage().persistent().set(&DataKey::Balance(to.clone()), &balance);
 
         let supply = Self::total_supply(env.clone());
-        env.storage().instance().set(&DataKey::TotalSupply, &(supply + amount));
+        env.storage().instance().set(&DataKey::TotalSupply, &(supply.checked_add(amount).unwrap()));
 
         // Record transaction
         Self::record_transaction(&env, TransactionType::Mint, asset.owner.clone(), Some(to.clone()), amount, asset_id, 0);
@@ -445,6 +446,7 @@ impl AssetToken {
 
     /// Transfer tokens between addresses
     pub fn transfer(env: Env, from: Address, to: Address, amount: i128, asset_id: u64, emergency_control_id: Address) {
+        assert!(amount > 0, "amount must be positive");
         from.require_auth();
         let ec_client = EmergencyControlClient::new(&env, &emergency_control_id);
         ec_client.require_not_paused(&asset_id, &PauseScope::Transfers);
@@ -456,8 +458,8 @@ impl AssetToken {
 
         let mut to_balance = Self::balance(env.clone(), to.clone());
 
-        from_balance -= amount;
-        to_balance += amount;
+        from_balance = from_balance.checked_sub(amount).unwrap();
+        to_balance = to_balance.checked_add(amount).unwrap();
 
         env.storage().persistent().set(&DataKey::Balance(from.clone()), &from_balance);
         env.storage().persistent().set(&DataKey::Balance(to.clone()), &to_balance);
@@ -534,7 +536,7 @@ impl AssetToken {
         let supply = Self::total_supply(env.clone());
         assert!(supply > 0, "no supply");
 
-        let amount_per_token = (total_dividend * 10_000_000) / supply;
+        let amount_per_token = total_dividend.checked_mul(10_000_000).unwrap().checked_div(supply).unwrap();
         let schedule = DividendSchedule {
             total_dividend,
             payout_asset,
@@ -561,7 +563,7 @@ impl AssetToken {
         let balance = Self::balance(env.clone(), claimant.clone());
         assert!(balance > 0, "no tokens");
 
-        let amount = (balance * schedule.amount_per_token) / 10_000_000;
+        let amount = balance.checked_mul(schedule.amount_per_token).unwrap().checked_div(10_000_000).unwrap();
         env.storage().persistent().set(&last_claim_key, &now);
         env.events().publish((Symbol::new(&env, "dividend_claimed"), asset_id, claimant), amount);
     }
@@ -1080,6 +1082,7 @@ impl AssetToken {
     }
 
     pub fn bridge_out(env: Env, caller: Address, asset_id: Address, amount: i128, target_chain: TargetChain, target_address: Bytes) -> BytesN<32> {
+        assert!(amount > 0, "amount must be positive");
         caller.require_auth();
         let config: BridgeConfig = env.storage().instance().get(&DataKey::BridgeConfig).expect("not configured");
         assert!(!config.paused, "paused");
@@ -1090,18 +1093,18 @@ impl AssetToken {
         let balance = Self::balance(env.clone(), caller.clone());
         assert!(balance >= amount, "insufficient balance");
 
-        let fee = (amount * (config.fee_bps as i128)) / 10_000;
-        let net = amount - fee;
+        let fee = amount.checked_mul(config.fee_bps as i128).unwrap().checked_div(10_000).unwrap();
+        let net = amount.checked_sub(fee).unwrap();
 
-        env.storage().persistent().set(&DataKey::Balance(caller.clone()), &(balance - amount));
+        env.storage().persistent().set(&DataKey::Balance(caller.clone()), &(balance.checked_sub(amount).unwrap()));
         let pool_bal = Self::balance(env.clone(), config.relayer_pool.clone());
-        env.storage().persistent().set(&DataKey::Balance(config.relayer_pool.clone()), &(pool_bal + fee));
+        env.storage().persistent().set(&DataKey::Balance(config.relayer_pool.clone()), &(pool_bal.checked_add(fee).unwrap()));
 
         let supply = Self::total_supply(env.clone());
-        env.storage().instance().set(&DataKey::TotalSupply, &(supply - net));
+        env.storage().instance().set(&DataKey::TotalSupply, &(supply.checked_sub(net).unwrap()));
 
         let nonce: u64 = env.storage().instance().get(&DataKey::BridgeNonce).unwrap_or(0);
-        env.storage().instance().set(&DataKey::BridgeNonce, &(nonce + 1));
+        env.storage().instance().set(&DataKey::BridgeNonce, &(nonce.checked_add(1).unwrap()));
 
         let mut id_bytes = [0u8; 32];
         id_bytes[..8].copy_from_slice(&nonce.to_le_bytes());
@@ -1116,14 +1119,15 @@ impl AssetToken {
     }
 
     pub fn bridge_in(env: Env, bridge_id: BytesN<32>, recipient: Address, asset_id: Address, amount: i128, source_chain: TargetChain) {
+        assert!(amount > 0, "amount must be positive");
         let admin: Address = env.storage().instance().get(&DataKey::Admin).expect("admin not set");
         admin.require_auth();
         
         let balance = Self::balance(env.clone(), recipient.clone());
-        env.storage().persistent().set(&DataKey::Balance(recipient.clone()), &(balance + amount));
+        env.storage().persistent().set(&DataKey::Balance(recipient.clone()), &(balance.checked_add(amount).unwrap()));
 
         let supply = Self::total_supply(env.clone());
-        env.storage().instance().set(&DataKey::TotalSupply, &(supply + amount));
+        env.storage().instance().set(&DataKey::TotalSupply, &(supply.checked_add(amount).unwrap()));
 
         if let Some(mut pending) = env.storage().persistent().get::<_, PendingBridge>(&DataKey::PendingBridge(bridge_id.clone())) {
             pending.status = BridgeStatus::Completed;
@@ -1159,6 +1163,7 @@ impl AssetToken {
 
     /// Stake tokens to earn yield
     pub fn stake_tokens(env: Env, from: Address, amount: i128) {
+        assert!(amount > 0, "amount must be positive");
         from.require_auth();
         
         let mut balance = Self::balance(env.clone(), from.clone());
@@ -1176,29 +1181,27 @@ impl AssetToken {
             
         // If already staking, update yield before adding more
         if staked_data.amount > 0 {
-            staked_data.accumulated_yields += Self::calculate_yield(&env, &staked_data);
+            staked_data.accumulated_yields = staked_data.accumulated_yields.checked_add(Self::calculate_yield(&env, &staked_data)).unwrap();
         }
         
-        staked_data.amount += amount;
+        staked_data.amount = staked_data.amount.checked_add(amount).unwrap();
         staked_data.start_time = env.ledger().timestamp();
         
-        balance -= amount;
+        balance = balance.checked_sub(amount).unwrap();
         
         env.storage().persistent().set(&DataKey::Balance(from.clone()), &balance);
         env.storage().persistent().set(&DataKey::Staked(from.clone()), &staked_data);
-
-        let total_staked = env.storage().instance().get(&DataKey::TotalStaked).unwrap_or(0);
-        env.storage().instance().set(&DataKey::TotalStaked, &(total_staked + amount));
-
-        // Record transaction
-        let asset: Asset = env.storage().instance().get(&DataKey::AssetInfo).expect("Asset not initialized");
-        Self::record_transaction(&env, TransactionType::Stake, from.clone(), None, amount, asset.id, 0);
-
+        
+        let mut total_staked: i128 = env.storage().instance().get(&DataKey::TotalStaked).unwrap_or(0);
+        total_staked = total_staked.checked_add(amount).unwrap();
+        env.storage().instance().set(&DataKey::TotalStaked, &total_staked);
+        
         env.events().publish((Symbol::new(&env, "tokens_staked"), from), amount);
     }
 
     /// Unstake tokens and claim yields
     pub fn unstake_tokens(env: Env, from: Address, amount: i128) {
+        assert!(amount > 0, "amount must be positive");
         from.require_auth();
         
         let mut staked_data = env.storage().persistent()
@@ -1210,14 +1213,14 @@ impl AssetToken {
         }
         
         let yield_earned = Self::calculate_yield(&env, &staked_data);
-        let total_yield = staked_data.accumulated_yields + yield_earned;
+        let total_yield = staked_data.accumulated_yields.checked_add(yield_earned).unwrap();
         
-        staked_data.amount -= amount;
+        staked_data.amount = staked_data.amount.checked_sub(amount).unwrap();
         staked_data.accumulated_yields = 0; // Yield claimed
         staked_data.start_time = env.ledger().timestamp();
         
         let mut balance = Self::balance(env.clone(), from.clone());
-        balance += amount + total_yield;
+        balance = balance.checked_add(amount).unwrap().checked_add(total_yield).unwrap();
         
         env.storage().persistent().set(&DataKey::Balance(from.clone()), &balance);
         
@@ -1226,15 +1229,12 @@ impl AssetToken {
         } else {
             env.storage().persistent().set(&DataKey::Staked(from.clone()), &staked_data);
         }
-
-        let total_staked = env.storage().instance().get(&DataKey::TotalStaked).unwrap_or(0);
-        env.storage().instance().set(&DataKey::TotalStaked, &(total_staked - amount));
-
-        // Record transaction
-        let asset: Asset = env.storage().instance().get(&DataKey::AssetInfo).expect("Asset not initialized");
-        Self::record_transaction(&env, TransactionType::Unstake, from.clone(), None, amount, asset.id, 0);
-
-        env.events().publish((Symbol::new(&env, "unstaked"), from), amount);
+        
+        let mut total_staked: i128 = env.storage().instance().get(&DataKey::TotalStaked).unwrap_or(0);
+        total_staked = total_staked.checked_sub(amount).unwrap();
+        env.storage().instance().set(&DataKey::TotalStaked, &total_staked);
+        
+        env.events().publish((Symbol::new(&env, "yields_claimed"), from), total_yield);
     }
     
     pub fn get_staked(env: Env, address: Address) -> Option<Staked> {
@@ -1250,7 +1250,9 @@ impl AssetToken {
         }
         
         // yield = (staked_amount * rate * time) / (year_seconds * basis_points_divisor)
-        (staked.amount * ANNUAL_YIELD_RATE * elapsed) / (SECONDS_IN_YEAR * BASIS_POINTS_DIVISOR)
+        staked.amount.checked_mul(ANNUAL_YIELD_RATE).unwrap()
+            .checked_mul(elapsed).unwrap()
+            .checked_div(SECONDS_IN_YEAR.checked_mul(BASIS_POINTS_DIVISOR).unwrap()).unwrap()
     }
 
     // Verification System Functions

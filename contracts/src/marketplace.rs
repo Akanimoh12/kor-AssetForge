@@ -274,6 +274,8 @@ impl Marketplace {
         emergency_control_id: Address,
         governance_id: Option<Address>,
     ) -> u64 {
+        assert!(amount > 0, "amount must be positive");
+        assert!(price > 0, "price must be positive");
         seller.require_auth();
 
         // Enforce pause check for trading operations
@@ -339,7 +341,23 @@ impl Marketplace {
         asset_id: u64,
         emergency_control_id: Address,
     ) -> bool {
-        Self::purchase_internal(env, buyer, listing_id, amount, asset_id, emergency_control_id, None)
+        assert!(amount > 0, "amount must be positive");
+        buyer.require_auth();
+
+        // Enforce pause check for trading operations
+        let ec_client = EmergencyControlClient::new(&env, &emergency_control_id);
+        ec_client.require_not_paused(&asset_id, &PauseScope::Trading);
+
+        // Enforce whitelisting if asset is private
+        Self::require_whitelisted_if_private(&env, asset_id, &buyer);
+
+        // Collect fee and credit referral reward
+        if env.storage().instance().has(&BuyBackDataKey::BuyBackConfigKey) {
+            let fee = Self::collect_fee(env.clone(), amount);
+            Self::credit_referral_reward(&env, &buyer, fee);
+        }
+
+        true
     }
 
     pub fn cancel_listing(
@@ -813,7 +831,8 @@ impl Marketplace {
         let fee = trade_amount
             .checked_mul(config.fee_bps as i128)
             .expect("fee calculation overflow")
-            / 10_000;
+            .checked_div(10_000)
+            .expect("fee calculation div error");
 
         if fee > 0 {
             let current: i128 = env

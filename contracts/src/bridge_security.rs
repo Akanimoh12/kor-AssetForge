@@ -226,6 +226,7 @@ impl BridgeSecurity {
         source_chain: Symbol,
         dest_chain: Symbol,
     ) -> u64 {
+        assert!(amount > 0, "Bridge: amount must be positive");
         sender.require_auth();
         require_not_paused(&env);
 
@@ -252,7 +253,7 @@ impl BridgeSecurity {
             .persistent()
             .get::<BridgeDataKey, u64>(&BridgeDataKey::LastBridgeTime(sender.clone()))
             .unwrap_or(0);
-        if now < last_time + cooldown {
+        if now < last_time.checked_add(cooldown).unwrap() {
             panic!("Bridge: cooldown period has not elapsed");
         }
 
@@ -279,7 +280,7 @@ impl BridgeSecurity {
             .get::<BridgeDataKey, u32>(&BridgeDataKey::RequestCount(sender.clone()))
             .unwrap_or(0);
 
-        if now >= win_start + window {
+        if now >= win_start.checked_add(window).unwrap() {
             // New window — reset counter.
             count = 0;
             env.storage()
@@ -291,7 +292,7 @@ impl BridgeSecurity {
             panic!("Bridge: rate limit exceeded for this user");
         }
 
-        count += 1;
+        count = count.checked_add(1).unwrap();
         env.storage()
             .persistent()
             .set(&BridgeDataKey::RequestCount(sender.clone()), &count);
@@ -361,7 +362,7 @@ impl BridgeSecurity {
             .instance()
             .get::<BridgeDataKey, u32>(&BridgeDataKey::PendingApprovals(request_id))
             .unwrap_or(0)
-            + 1;
+            .checked_add(1).unwrap();
         env.storage()
             .instance()
             .set(&BridgeDataKey::PendingApprovals(request_id), &approvals);
@@ -391,7 +392,7 @@ impl BridgeSecurity {
                 .unwrap_or(0);
             env.storage()
                 .instance()
-                .set(&BridgeDataKey::TotalVolume, &(vol + req.amount));
+                .set(&BridgeDataKey::TotalVolume, &(vol.checked_add(req.amount).unwrap()));
 
             env.events().publish(
                 (Symbol::new(&env, "bridge_approved"),),
@@ -417,6 +418,7 @@ impl BridgeSecurity {
     /// Emergency withdrawal: send accumulated funds to a pre-configured
     /// recipient. Only callable by admin while bridge is paused.
     pub fn emergency_withdraw(env: Env, caller: Address, amount: i128) {
+        assert!(amount > 0, "Bridge: amount must be positive");
         require_admin(&env, &caller);
         let paused: bool = env
             .storage()

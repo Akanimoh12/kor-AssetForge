@@ -170,10 +170,10 @@ impl Governance {
             .unwrap_or(1);
         env.storage()
             .instance()
-            .set(&GovDataKey::NextProposalId, &(proposal_id + 1));
+            .set(&GovDataKey::NextProposalId, &(proposal_id.checked_add(1).unwrap()));
 
         // end_time = current ledger timestamp + duration
-        let end_time = env.ledger().timestamp() + duration;
+        let end_time = env.ledger().timestamp().checked_add(duration).expect("timestamp overflow");
 
         let proposal = Proposal {
             proposal_id,
