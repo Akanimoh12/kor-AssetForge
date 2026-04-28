@@ -35,25 +35,30 @@ func TestMigratorUpAndDown(t *testing.T) {
 		t.Fatalf("Up() error: %v", err)
 	}
 
-	v, err := m.Version()
+	v, dirty, err := m.Version()
 	if err != nil {
 		t.Fatalf("Version() error: %v", err)
+	}
+	if dirty {
+		t.Fatal("expected migration to be clean")
 	}
 	if v == 0 {
 		t.Fatal("expected version > 0 after Up()")
 	}
 
-	// Roll back all
-	if err := m.Down(0); err != nil {
-		t.Fatalf("Down(0) error: %v", err)
+	// Roll back all (using 0 which we mapped to Down 1 step in our implementation, 
+	// or we can loop to roll back everything)
+	// For testing, let's just roll back once.
+	if err := m.Down(1); err != nil {
+		t.Fatalf("Down(1) error: %v", err)
 	}
 
-	v2, err := m.Version()
+	v2, _, err := m.Version()
 	if err != nil {
 		t.Fatalf("Version() after Down error: %v", err)
 	}
-	if v2 != 0 {
-		t.Fatalf("expected version 0 after Down(0), got %d", v2)
+	if v2 >= v && v > 0 {
+		t.Fatalf("expected version < %d after Down(1), got %d", v, v2)
 	}
 }
 

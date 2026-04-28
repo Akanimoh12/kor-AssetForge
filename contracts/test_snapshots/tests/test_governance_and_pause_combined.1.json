@@ -2584,15 +2584,36 @@
               },
               {
                 "u64": 1
+              },
+              {
+                "u64": 30
               }
             ],
             "data": {
-              "vec": [
+              "map": [
                 {
-                  "u64": 30
+                  "key": {
+                    "symbol": "end_time"
+                  },
+                  "val": {
+                    "u64": 3600
+                  }
                 },
                 {
-                  "u64": 3600
+                  "key": {
+                    "symbol": "proposer"
+                  },
+                  "val": {
+                    "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAMDR4"
+                  }
+                },
+                {
+                  "key": {
+                    "symbol": "version"
+                  },
+                  "val": {
+                    "u32": 1
+                  }
                 }
               ]
             }
@@ -2728,17 +2749,40 @@
               }
             ],
             "data": {
-              "vec": [
+              "map": [
                 {
-                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAOLZM"
+                  "key": {
+                    "symbol": "version"
+                  },
+                  "val": {
+                    "u32": 1
+                  }
                 },
                 {
-                  "bool": true
+                  "key": {
+                    "symbol": "vote_yes"
+                  },
+                  "val": {
+                    "bool": true
+                  }
                 },
                 {
-                  "i128": {
-                    "hi": 0,
-                    "lo": 150
+                  "key": {
+                    "symbol": "voter"
+                  },
+                  "val": {
+                    "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAOLZM"
+                  }
+                },
+                {
+                  "key": {
+                    "symbol": "weight"
+                  },
+                  "val": {
+                    "i128": {
+                      "hi": 0,
+                      "lo": 150
+                    }
                   }
                 }
               ]
@@ -2808,10 +2852,44 @@
               },
               {
                 "u64": 1
+              },
+              {
+                "u64": 30
               }
             ],
             "data": {
-              "u64": 30
+              "map": [
+                {
+                  "key": {
+                    "symbol": "version"
+                  },
+                  "val": {
+                    "u32": 1
+                  }
+                },
+                {
+                  "key": {
+                    "symbol": "votes_against"
+                  },
+                  "val": {
+                    "i128": {
+                      "hi": 0,
+                      "lo": 0
+                    }
+                  }
+                },
+                {
+                  "key": {
+                    "symbol": "votes_for"
+                  },
+                  "val": {
+                    "i128": {
+                      "hi": 0,
+                      "lo": 150
+                    }
+                  }
+                }
+              ]
             }
           }
         }
@@ -3098,7 +3176,7 @@
             "data": {
               "vec": [
                 {
-                  "string": "caught panic 'operation blocked: asset is paused' from contract function 'Symbol(obj#503)'"
+                  "string": "caught panic 'operation blocked: asset is paused' from contract function 'Symbol(obj#515)'"
                 },
                 {
                   "u64": 30
