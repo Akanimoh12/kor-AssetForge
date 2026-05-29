@@ -1,0 +1,70 @@
+{
+  "common": {
+    "app_name": "kor-AssetForge",
+    "loading": "Cargando...",
+    "error": "Error",
+    "success": "Éxito",
+    "cancel": "Cancelar",
+    "save": "Guardar",
+    "delete": "Eliminar",
+    "edit": "Editar",
+    "close": "Cerrar"
+  },
+  "auth": {
+    "login": "Iniciar sesión",
+    "register": "Registrarse",
+    "logout": "Cerrar sesión",
+    "email": "Correo electrónico",
+    "password": "Contraseña",
+    "confirm_password": "Confirmar contraseña",
+    "forgot_password": "¿Olvidó su contraseña?",
+    "reset_password": "Restablecer contraseña",
+    "remember_me": "Recuérdame",
+    "login_title": "Inicia sesión en kor-AssetForge",
+    "register_title": "Crea tu cuenta",
+    "invalid_credentials": "Correo electrónico o contraseña inválidos",
+    "passwords_dont_match": "Las contraseñas no coinciden",
+    "email_required": "El correo electrónico es obligatorio",
+    "password_required": "La contraseña es obligatoria"
+  },
+  "errors": {
+    "network_error": "Error de red. Por favor, intenta de nuevo.",
+    "unauthorized": "No estás autorizado para realizar esta acción",
+    "forbidden": "Acceso prohibido",
+    "not_found": "Recurso no encontrado",
+    "server_error": "Error del servidor. Por favor, intenta más tarde",
+    "rate_limit_exceeded": "Demasiadas solicitudes. Por favor, intenta más tarde",
+    "invalid_input": "Entrada inválida",
+    "something_went_wrong": "Algo salió mal"
+  },
+  "assets": {
+    "title": "Activos",
+    "create": "Crear Activo",
+    "tokenize": "Tokenizar Activo",
+    "list": "Lista de Activos",
+    "details": "Detalles del Activo",
+    "name": "Nombre",
+    "description": "Descripción",
+    "value": "Valor",
+    "status": "Estado",
+    "created": "Creado",
+    "updated": "Actualizado"
+  },
+  "marketplace": {
+    "title": "Mercado",
+    "list_for_sale": "Listar para Venta",
+    "transfer": "Transferir",
+    "price": "Precio",
+    "quantity": "Cantidad",
+    "buy": "Comprar",
+    "sell": "Vender"
+  },
+  "kyc": {
+    "title": "KYC",
+    "submit": "Enviar KYC",
+    "status": "Estado de KYC",
+    "documents": "Documentos",
+    "aml_screen": "Evaluación AML",
+    "accredited": "Inversor Acreditado"
+  }
+}

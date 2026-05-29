@@ -1,0 +1,70 @@
+{
+  "common": {
+    "app_name": "kor-AssetForge",
+    "loading": "加载中...",
+    "error": "错误",
+    "success": "成功",
+    "cancel": "取消",
+    "save": "保存",
+    "delete": "删除",
+    "edit": "编辑",
+    "close": "关闭"
+  },
+  "auth": {
+    "login": "登录",
+    "register": "注册",
+    "logout": "退出",
+    "email": "电子邮件",
+    "password": "密码",
+    "confirm_password": "确认密码",
+    "forgot_password": "忘记密码?",
+    "reset_password": "重置密码",
+    "remember_me": "记住我",
+    "login_title": "登录到 kor-AssetForge",
+    "register_title": "创建您的账户",
+    "invalid_credentials": "无效的电子邮件或密码",
+    "passwords_dont_match": "密码不匹配",
+    "email_required": "电子邮件为必填项",
+    "password_required": "密码为必填项"
+  },
+  "errors": {
+    "network_error": "网络错误。请重试。",
+    "unauthorized": "您无权执行此操作",
+    "forbidden": "禁止访问",
+    "not_found": "未找到资源",
+    "server_error": "服务器错误。请稍后重试",
+    "rate_limit_exceeded": "请求过于频繁。请稍后重试",
+    "invalid_input": "无效输入",
+    "something_went_wrong": "出错了"
+  },
+  "assets": {
+    "title": "资产",
+    "create": "创建资产",
+    "tokenize": "资产代币化",
+    "list": "资产列表",
+    "details": "资产详情",
+    "name": "名称",
+    "description": "描述",
+    "value": "价值",
+    "status": "状态",
+    "created": "创建时间",
+    "updated": "更新时间"
+  },
+  "marketplace": {
+    "title": "市场",
+    "list_for_sale": "上架出售",
+    "transfer": "转账",
+    "price": "价格",
+    "quantity": "数量",
+    "buy": "购买",
+    "sell": "出售"
+  },
+  "kyc": {
+    "title": "KYC",
+    "submit": "提交 KYC",
+    "status": "KYC 状态",
+    "documents": "文档",
+    "aml_screen": "AML 筛选",
+    "accredited": "认证投资者"
+  }
+}
