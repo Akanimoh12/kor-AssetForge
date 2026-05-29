@@ -51,6 +51,8 @@ func InitDB() (*gorm.DB, error) {
 		&models.KYCDocument{},
 		&models.AMLScreening{},
 		&models.ComplianceAuditLog{},
+		// Batch transaction model (#106)
+		&models.BatchTransaction{},
 	); err != nil {
 		return nil, fmt.Errorf("failed to auto-migrate models: %w", err)
 	}

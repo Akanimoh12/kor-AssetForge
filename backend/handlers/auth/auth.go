@@ -1,8 +1,14 @@
 package auth
 
 import (
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha1"
+	"encoding/base32"
+	"encoding/binary"
 	"encoding/hex"
+	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"strings"
@@ -57,11 +63,11 @@ type LoginRequest struct {
 
 // TokenResponse represents JWT token response
 type TokenResponse struct {
-	AccessToken  string    `json:"access_token"`
-	RefreshToken string    `json:"refresh_token"`
-	TokenType    string    `json:"token_type"`
-	ExpiresIn    int64     `json:"expires_in"`
-	User         UserInfo  `json:"user"`
+	AccessToken  string   `json:"access_token"`
+	RefreshToken string   `json:"refresh_token"`
+	TokenType    string   `json:"token_type"`
+	ExpiresIn    int64    `json:"expires_in"`
+	User         UserInfo `json:"user"`
 }
 
 // UserInfo represents user information in responses
@@ -73,6 +79,7 @@ type UserInfo struct {
 	Role           string     `json:"role"`
 	EmailVerified  bool       `json:"email_verified"`
 	KYCVerified    bool       `json:"kyc_verified"`
+	TOTPEnabled    bool       `json:"totp_enabled"`
 	LastLoginAt    *time.Time `json:"last_login_at,omitempty"`
 }
 
@@ -95,6 +102,30 @@ type ForgotPasswordRequest struct {
 type ResetPasswordRequest struct {
 	Token    string `json:"token" binding:"required"`
 	Password string `json:"password" binding:"required,min=8"`
+}
+
+// Setup2FARequest represents 2FA setup request
+type Setup2FARequest struct {
+	Token string `json:"token" binding:"required"`
+}
+
+// Disable2FARequest represents 2FA disable request
+type Disable2FARequest struct {
+	Password  string `json:"password" binding:"required"`
+	TOTPToken string `json:"totp_token" binding:"required"`
+}
+
+// Verify2FARequest represents 2FA verification during login
+type Verify2FARequest struct {
+	UserID    uint   `json:"user_id" binding:"required"`
+	TOTPToken string `json:"totp_token" binding:"required"`
+}
+
+// Setup2FAResponse represents the response for 2FA setup
+type Setup2FAResponse struct {
+	Secret      string   `json:"secret"`
+	QRURL       string   `json:"qr_url"`
+	BackupCodes []string `json:"backup_codes"`
 }
 
 // Register handles user registration
@@ -189,6 +220,15 @@ func (h *AuthHandler) Login(c *gin.Context) {
 
 	if !user.EmailVerified {
 		apperrors.AbortWithError(c, apperrors.NewForbiddenError("Please verify your email before logging in"))
+		return
+	}
+
+	if user.TOTPEnabled {
+		c.JSON(http.StatusOK, gin.H{
+			"requires_2fa": true,
+			"user_id":      user.ID,
+			"message":      "Please complete two-factor authentication",
+		})
 		return
 	}
 
@@ -440,6 +480,212 @@ func (h *AuthHandler) GetProfile(c *gin.Context) {
 	c.JSON(http.StatusOK, toUserInfo(&user))
 }
 
+// Setup2FA initiates 2FA setup for the authenticated user
+func (h *AuthHandler) Setup2FA(c *gin.Context) {
+	userID, exists := c.Get("user_id")
+	if !exists {
+		apperrors.AbortWithError(c, apperrors.NewUnauthorizedError("User not authenticated"))
+		return
+	}
+
+	var user models.User
+	if err := h.db.First(&user, userID).Error; err != nil {
+		apperrors.AbortWithError(c, apperrors.NewNotFoundError("User not found"))
+		return
+	}
+
+	if user.TOTPEnabled {
+		apperrors.AbortWithError(c, apperrors.NewBadRequestError("2FA is already enabled"))
+		return
+	}
+
+	secret := generateTOTPSecret()
+	issuer := "kor-AssetForge"
+	qrURL := fmt.Sprintf("otpauth://totp/%s:%s?secret=%s&issuer=%s&algorithm=SHA1&digits=6&period=30",
+		issuer, user.Email, secret, issuer)
+
+	backupCodes := make([]string, 8)
+	for i := range backupCodes {
+		backupCodes[i] = generateSecureToken()[:10]
+	}
+	codesJSON, _ := json.Marshal(backupCodes)
+
+	user.TOTPSecret = secret
+	user.TOTPVerified = false
+	user.BackupCodes = string(codesJSON)
+	h.db.Save(&user)
+
+	c.JSON(http.StatusOK, Setup2FAResponse{
+		Secret:      secret,
+		QRURL:       qrURL,
+		BackupCodes: backupCodes,
+	})
+}
+
+// Verify2FA verifies and enables 2FA for the authenticated user
+func (h *AuthHandler) Verify2FA(c *gin.Context) {
+	userID, exists := c.Get("user_id")
+	if !exists {
+		apperrors.AbortWithError(c, apperrors.NewUnauthorizedError("User not authenticated"))
+		return
+	}
+
+	var req Setup2FARequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		apperrors.AbortWithError(c, apperrors.NewValidationError("Invalid request data", err))
+		return
+	}
+
+	var user models.User
+	if err := h.db.First(&user, userID).Error; err != nil {
+		apperrors.AbortWithError(c, apperrors.NewNotFoundError("User not found"))
+		return
+	}
+
+	if user.TOTPEnabled {
+		apperrors.AbortWithError(c, apperrors.NewBadRequestError("2FA is already enabled"))
+		return
+	}
+
+	if !validateTOTP(user.TOTPSecret, req.Token) {
+		apperrors.AbortWithError(c, apperrors.NewBadRequestError("Invalid TOTP token"))
+		return
+	}
+
+	user.TOTPEnabled = true
+	user.TOTPVerified = true
+	h.db.Save(&user)
+
+	c.JSON(http.StatusOK, gin.H{"message": "2FA enabled successfully"})
+}
+
+// Disable2FA disables 2FA for the authenticated user with verification
+func (h *AuthHandler) Disable2FA(c *gin.Context) {
+	userID, exists := c.Get("user_id")
+	if !exists {
+		apperrors.AbortWithError(c, apperrors.NewUnauthorizedError("User not authenticated"))
+		return
+	}
+
+	var req Disable2FARequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		apperrors.AbortWithError(c, apperrors.NewValidationError("Invalid request data", err))
+		return
+	}
+
+	var user models.User
+	if err := h.db.First(&user, userID).Error; err != nil {
+		apperrors.AbortWithError(c, apperrors.NewNotFoundError("User not found"))
+		return
+	}
+
+	if !user.TOTPEnabled {
+		apperrors.AbortWithError(c, apperrors.NewBadRequestError("2FA is not enabled"))
+		return
+	}
+
+	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(req.Password)); err != nil {
+		apperrors.AbortWithError(c, apperrors.NewUnauthorizedError("Invalid password"))
+		return
+	}
+
+	validTOTP := validateTOTP(user.TOTPSecret, req.TOTPToken)
+	validBackup := false
+	if !validTOTP {
+		var codes []string
+		if err := json.Unmarshal([]byte(user.BackupCodes), &codes); err == nil {
+			for _, code := range codes {
+				if code == req.TOTPToken {
+					validBackup = true
+					break
+				}
+			}
+		}
+	}
+
+	if !validTOTP && !validBackup {
+		apperrors.AbortWithError(c, apperrors.NewBadRequestError("Invalid TOTP token or backup code"))
+		return
+	}
+
+	user.TOTPSecret = ""
+	user.TOTPEnabled = false
+	user.TOTPVerified = false
+	user.BackupCodes = ""
+	h.db.Save(&user)
+
+	c.JSON(http.StatusOK, gin.H{"message": "2FA disabled successfully"})
+}
+
+// LoginWith2FA handles the second step of 2FA login
+func (h *AuthHandler) LoginWith2FA(c *gin.Context) {
+	var req Verify2FARequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		apperrors.AbortWithError(c, apperrors.NewValidationError("Invalid request data", err))
+		return
+	}
+
+	var user models.User
+	if err := h.db.First(&user, req.UserID).Error; err != nil {
+		apperrors.AbortWithError(c, apperrors.NewUnauthorizedError("User not found"))
+		return
+	}
+
+	if !user.TOTPEnabled {
+		apperrors.AbortWithError(c, apperrors.NewBadRequestError("2FA is not enabled for this user"))
+		return
+	}
+
+	validTOTP := validateTOTP(user.TOTPSecret, req.TOTPToken)
+	validBackup := false
+	if !validTOTP {
+		var codes []string
+		if err := json.Unmarshal([]byte(user.BackupCodes), &codes); err == nil {
+			for i, code := range codes {
+				if code == req.TOTPToken {
+					codes = append(codes[:i], codes[i+1:]...)
+					updatedCodes, _ := json.Marshal(codes)
+					user.BackupCodes = string(updatedCodes)
+					validBackup = true
+					break
+				}
+			}
+		}
+	}
+
+	if !validTOTP && !validBackup {
+		apperrors.AbortWithError(c, apperrors.NewBadRequestError("Invalid TOTP token or backup code"))
+		return
+	}
+
+	now := time.Now()
+	user.LastLoginAt = &now
+	h.db.Save(&user)
+
+	accessToken, refreshToken, err := h.generateTokens(&user)
+	if err != nil {
+		apperrors.AbortWithError(c, apperrors.NewInternalError("Failed to generate tokens"))
+		return
+	}
+
+	session := models.UserSession{
+		UserID:       user.ID,
+		SessionToken: generateSecureToken(),
+		IPAddress:    c.ClientIP(),
+		UserAgent:    c.GetHeader("User-Agent"),
+		ExpiresAt:    time.Now().Add(time.Hour * time.Duration(h.config.RefreshTokenHours)),
+	}
+	h.db.Create(&session)
+
+	c.JSON(http.StatusOK, TokenResponse{
+		AccessToken:  accessToken,
+		RefreshToken: refreshToken,
+		TokenType:    "Bearer",
+		ExpiresIn:    int64(h.config.JWTExpirationHours * 3600),
+		User:         toUserInfo(&user),
+	})
+}
+
 func (h *AuthHandler) generateTokens(user *models.User) (string, string, error) {
 	accessClaims := jwt.MapClaims{
 		"user_id":  user.ID,
@@ -479,6 +725,50 @@ func generateSecureToken() string {
 	return hex.EncodeToString(b)
 }
 
+func generateTOTPSecret() string {
+	secret := make([]byte, 20)
+	rand.Read(secret)
+	return base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(secret)
+}
+
+func validateTOTP(secret string, token string) bool {
+	if secret == "" || token == "" {
+		return false
+	}
+
+	key, err := base32.StdEncoding.WithPadding(base32.NoPadding).DecodeString(secret)
+	if err != nil {
+		return false
+	}
+
+	now := time.Now().Unix()
+	for i := int64(-1); i <= 1; i++ {
+		counter := uint64(now/30 + i)
+		if computeTOTP(key, counter) == token {
+			return true
+		}
+	}
+	return false
+}
+
+func computeTOTP(key []byte, counter uint64) string {
+	counterBytes := make([]byte, 8)
+	binary.BigEndian.PutUint64(counterBytes, counter)
+
+	mac := hmac.New(sha1.New, key)
+	mac.Write(counterBytes)
+	hash := mac.Sum(nil)
+
+	offset := hash[len(hash)-1] & 0xf
+	code := (int(hash[offset]&0x7f) << 24) |
+		(int(hash[offset+1]) << 16) |
+		(int(hash[offset+2]) << 8) |
+		int(hash[offset+3]&0xff)
+
+	code = code % 1000000
+	return fmt.Sprintf("%06d", code)
+}
+
 func toUserInfo(u *models.User) UserInfo {
 	return UserInfo{
 		ID:             u.ID,
@@ -488,6 +778,7 @@ func toUserInfo(u *models.User) UserInfo {
 		Role:           string(u.Role),
 		EmailVerified:  u.EmailVerified,
 		KYCVerified:    u.KYCVerified,
+		TOTPEnabled:    u.TOTPEnabled,
 		LastLoginAt:    u.LastLoginAt,
 	}
 }

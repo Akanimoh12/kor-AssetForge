@@ -182,6 +182,24 @@ pub enum TransactionType {
 
 #[derive(Clone)]
 #[contracttype]
+pub struct BatchTransfer {
+    pub batch_id: u64,
+    pub from: Address,
+    pub transfers: Vec<BatchTransferEntry>,
+    pub total_amount: i128,
+    pub timestamp: u64,
+    pub completed: bool,
+}
+
+#[derive(Clone)]
+#[contracttype]
+pub struct BatchTransferEntry {
+    pub to: Address,
+    pub amount: i128,
+}
+
+#[derive(Clone)]
+#[contracttype]
 pub struct TransactionAnalytics {
     pub total_transactions: u64,
     pub total_volume: i128,
@@ -296,6 +314,10 @@ pub enum DataKey {
     Asset,
     Staked(Address),
     TotalStaked,
+    // Batch transaction keys
+    BatchTransaction(u64),
+    UserBatchTransactions(Address),
+    LastBatchIndex,
     // Verification system keys
     Verifier(Address),
     VerifiersList,
@@ -468,6 +490,91 @@ impl AssetToken {
         Self::record_transaction(&env, TransactionType::Transfer, from.clone(), Some(to.clone()), amount, asset_id, 0);
 
         env.events().publish((Symbol::new(&env, "transfer"), from, to), amount);
+    }
+
+    /// Execute a batch of transfers atomically
+    pub fn batch_transfer(
+        env: Env,
+        from: Address,
+        transfers: Vec<BatchTransferEntry>,
+        asset_id: u64,
+        emergency_control_id: Address,
+    ) -> u64 {
+        from.require_auth();
+        assert!(transfers.len() > 0, "batch must contain at least one transfer");
+        assert!(transfers.len() <= 50, "batch cannot exceed 50 transfers");
+
+        let ec_client = EmergencyControlClient::new(&env, &emergency_control_id);
+        ec_client.require_not_paused(&asset_id, &PauseScope::Transfers);
+
+        let mut total_amount: i128 = 0;
+        for i in 0..transfers.len() {
+            let entry = transfers.get(i).unwrap();
+            assert!(entry.amount > 0, "each transfer amount must be positive");
+            total_amount = total_amount.checked_add(entry.amount).unwrap();
+        }
+
+        let mut from_balance = Self::balance(env.clone(), from.clone());
+        assert!(from_balance >= total_amount, "insufficient balance for batch");
+
+        from_balance = from_balance.checked_sub(total_amount).unwrap();
+        env.storage().persistent().set(&DataKey::Balance(from.clone()), &from_balance);
+
+        let mut total_gas_saved: i128 = 0;
+        for i in 0..transfers.len() {
+            let entry = transfers.get(i).unwrap();
+            let mut to_balance = Self::balance(env.clone(), entry.to.clone());
+            to_balance = to_balance.checked_add(entry.amount).unwrap();
+            env.storage().persistent().set(&DataKey::Balance(entry.to.clone()), &to_balance);
+
+            Self::record_transaction(
+                &env,
+                TransactionType::Transfer,
+                from.clone(),
+                Some(entry.to.clone()),
+                entry.amount,
+                asset_id,
+                0,
+            );
+
+            env.events().publish(
+                (Symbol::new(&env, "batch_transfer"), from.clone(), entry.to.clone()),
+                (i as u64 + 1, entry.amount),
+            );
+
+            total_gas_saved = total_gas_saved.checked_add(entry.amount).unwrap();
+        }
+
+        let batch_id = env.storage().instance().get(&DataKey::LastBatchIndex).unwrap_or(0u64) + 1;
+        let batch = BatchTransfer {
+            batch_id,
+            from: from.clone(),
+            transfers,
+            total_amount,
+            timestamp: env.ledger().timestamp(),
+            completed: true,
+        };
+
+        env.storage().instance().set(&DataKey::BatchTransaction(batch_id), &batch);
+        env.storage().instance().set(&DataKey::LastBatchIndex, &batch_id);
+
+        let mut user_batches: Vec<u64> = env.storage().instance().get(&DataKey::UserBatchTransactions(from.clone())).unwrap_or(Vec::new(&env));
+        user_batches.push_back(batch_id);
+        env.storage().instance().set(&DataKey::UserBatchTransactions(from), &user_batches);
+
+        env.events().publish((Symbol::new(&env, "batch_completed"), from), batch_id);
+
+        batch_id
+    }
+
+    /// Get batch transfer details
+    pub fn get_batch_transfer(env: Env, batch_id: u64) -> Option<BatchTransfer> {
+        env.storage().instance().get(&DataKey::BatchTransaction(batch_id))
+    }
+
+    /// Get user's batch transaction IDs
+    pub fn get_user_batch_transactions(env: Env, user: Address) -> Vec<u64> {
+        env.storage().instance().get(&DataKey::UserBatchTransactions(user)).unwrap_or(Vec::new(&env))
     }
 
     pub fn total_supply(env: Env) -> i128 {

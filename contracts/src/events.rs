@@ -152,3 +152,65 @@ pub struct UpgradeCancelledEvent {
     pub version: u32,
     pub timestamp: u64,
 }
+
+// ---------------------------------------------------------------------------
+// Oracle events
+// ---------------------------------------------------------------------------
+
+/// Payload for "aggregator_set".
+/// Topics: (Symbol("aggregator_set"), asset_id)
+#[contracttype]
+#[derive(Clone)]
+pub struct AggregatorSetEvent {
+    pub version: u32,
+    pub aggregator: Address,
+}
+
+/// Payload for "aggregator_round".
+/// Topics: (Symbol("aggregator_round"), asset_id, round_id)
+#[contracttype]
+#[derive(Clone)]
+pub struct AggregatorRoundEvent {
+    pub version: u32,
+    pub price: i128,
+    pub timestamp: u64,
+}
+
+/// Payload for "band_price".
+/// Topics: (Symbol("band_price"), asset_id)
+#[contracttype]
+#[derive(Clone)]
+pub struct BandPriceEvent {
+    pub version: u32,
+    pub price: i128,
+    pub valid_signatures: u32,
+}
+
+/// Payload for "price_auto_updated".
+/// Topics: (Symbol("price_auto_updated"), asset_id)
+#[contracttype]
+#[derive(Clone)]
+pub struct PriceAutoUpdatedEvent {
+    pub version: u32,
+    pub price: i128,
+    pub timestamp: u64,
+}
+
+/// Payload for "heartbeat_set".
+/// Topics: (Symbol("heartbeat_set"),)
+#[contracttype]
+#[derive(Clone)]
+pub struct HeartbeatSetEvent {
+    pub version: u32,
+    pub interval_seconds: u64,
+}
+
+/// Payload for "stale_price_detected".
+/// Topics: (Symbol("stale_price_detected"), asset_id)
+#[contracttype]
+#[derive(Clone)]
+pub struct StalePriceDetectedEvent {
+    pub version: u32,
+    pub price_age: u64,
+    pub threshold: u64,
+}

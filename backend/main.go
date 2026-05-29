@@ -13,9 +13,8 @@ import (
 	swaggerFiles "github.com/swaggo/files"
 	ginSwagger "github.com/swaggo/gin-swagger"
 	"github.com/ulule/limiter/v3"
-	"golang.org/x/time/rate"
-	_ "github.com/yourusername/kor-assetforge/docs"
 	"github.com/yourusername/kor-assetforge/config"
+	_ "github.com/yourusername/kor-assetforge/docs"
 	"github.com/yourusername/kor-assetforge/handlers"
 	"github.com/yourusername/kor-assetforge/handlers/auth"
 	"github.com/yourusername/kor-assetforge/middleware"
@@ -23,6 +22,7 @@ import (
 	"github.com/yourusername/kor-assetforge/services"
 	"github.com/yourusername/kor-assetforge/utils"
 	"github.com/yourusername/kor-assetforge/validator"
+	"golang.org/x/time/rate"
 )
 
 // @title kor-AssetForge API
@@ -166,6 +166,11 @@ func main() {
 			protected.GET("/profile", authHandler.GetProfile)
 			protected.POST("/logout", authHandler.Logout)
 
+			// 2FA routes
+			protected.POST("/auth/2fa/setup", authHandler.Setup2FA)
+			protected.POST("/auth/2fa/verify", authHandler.Verify2FA)
+			protected.POST("/auth/2fa/disable", authHandler.Disable2FA)
+
 			// Admin-only routes
 			admin := protected.Group("")
 			admin.Use(authMiddleware.RequireRole(models.RoleAdmin))
@@ -173,6 +178,9 @@ func main() {
 				_ = admin // placeholder until admin routes are added
 			}
 		}
+
+		// 2FA verification during login (unauthenticated)
+		v1.POST("/auth/2fa/login", authHandler.LoginWith2FA)
 
 		// Asset routes (with write-through cache invalidation)
 		assetHandler := handlers.NewAssetHandler(db, stellarClient, redisClient, emailService)
@@ -188,6 +196,35 @@ func main() {
 		v1.GET("/assets/:id",
 			middleware.HTTPCache(cacheManager, 5*time.Minute, "kor:asset", nil),
 			assetHandler.GetAsset)
+
+		// NFT Metadata routes
+		v1.POST("/assets/metadata",
+			middleware.InvalidateOnWrite(cacheManager, "kor:asset:*"),
+			assetHandler.UpdateMetadata)
+		v1.GET("/assets/:id/metadata",
+			middleware.HTTPCache(cacheManager, 5*time.Minute, "kor:asset", nil),
+			assetHandler.GetMetadata)
+		v1.POST("/assets/metadata/immutable",
+			middleware.InvalidateOnWrite(cacheManager, "kor:asset:*"),
+			assetHandler.MakeMetadataImmutable)
+
+		// Oracle price feed routes (#104)
+		v1.GET("/oracle/price",
+			middleware.HTTPCache(cacheManager, 1*time.Minute, "kor:oracle", nil),
+			assetHandler.GetOraclePrice)
+		v1.GET("/assets/:id/oracle-price",
+			middleware.HTTPCache(cacheManager, 1*time.Minute, "kor:oracle", nil),
+			assetHandler.GetAssetOraclePrice)
+
+		// Batch transaction routes (#106)
+		v1.POST("/batch/execute",
+			middleware.InvalidateOnWrite(cacheManager, "kor:asset:*"),
+			assetHandler.ExecuteBatch)
+		v1.GET("/batch/:id",
+			middleware.HTTPCache(cacheManager, 1*time.Minute, "kor:batch", nil),
+			assetHandler.GetBatchStatus)
+		v1.GET("/batches",
+			assetHandler.ListBatchTransactions)
 
 		// Marketplace routes
 		v1.POST("/marketplace/list",
