@@ -1,0 +1,70 @@
+{
+  "common": {
+    "app_name": "kor-AssetForge",
+    "loading": "Loading...",
+    "error": "Error",
+    "success": "Success",
+    "cancel": "Cancel",
+    "save": "Save",
+    "delete": "Delete",
+    "edit": "Edit",
+    "close": "Close"
+  },
+  "auth": {
+    "login": "Login",
+    "register": "Register",
+    "logout": "Logout",
+    "email": "Email",
+    "password": "Password",
+    "confirm_password": "Confirm Password",
+    "forgot_password": "Forgot Password?",
+    "reset_password": "Reset Password",
+    "remember_me": "Remember me",
+    "login_title": "Sign in to kor-AssetForge",
+    "register_title": "Create your account",
+    "invalid_credentials": "Invalid email or password",
+    "passwords_dont_match": "Passwords do not match",
+    "email_required": "Email is required",
+    "password_required": "Password is required"
+  },
+  "errors": {
+    "network_error": "Network error. Please try again.",
+    "unauthorized": "You are not authorized to perform this action",
+    "forbidden": "Access forbidden",
+    "not_found": "Resource not found",
+    "server_error": "Server error. Please try again later",
+    "rate_limit_exceeded": "Too many requests. Please try again later",
+    "invalid_input": "Invalid input",
+    "something_went_wrong": "Something went wrong"
+  },
+  "assets": {
+    "title": "Assets",
+    "create": "Create Asset",
+    "tokenize": "Tokenize Asset",
+    "list": "Asset List",
+    "details": "Asset Details",
+    "name": "Name",
+    "description": "Description",
+    "value": "Value",
+    "status": "Status",
+    "created": "Created",
+    "updated": "Updated"
+  },
+  "marketplace": {
+    "title": "Marketplace",
+    "list_for_sale": "List for Sale",
+    "transfer": "Transfer",
+    "price": "Price",
+    "quantity": "Quantity",
+    "buy": "Buy",
+    "sell": "Sell"
+  },
+  "kyc": {
+    "title": "KYC",
+    "submit": "Submit KYC",
+    "status": "KYC Status",
+    "documents": "Documents",
+    "aml_screen": "AML Screening",
+    "accredited": "Accredited Investor"
+  }
+}
