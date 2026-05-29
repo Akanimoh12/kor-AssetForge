@@ -1,0 +1,3 @@
+DROP TABLE IF EXISTS price_points;
+DROP TABLE IF EXISTS p2p_trades;
+DROP TABLE IF EXISTS p2p_orders;
