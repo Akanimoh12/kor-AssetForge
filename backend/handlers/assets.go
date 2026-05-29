@@ -391,6 +391,376 @@ func (h *AssetHandler) TransferAsset(c *gin.Context) {
 	c.JSON(http.StatusOK, transaction)
 }
 
+// UpdateMetadata updates the NFT metadata URI and hash for an asset
+func (h *AssetHandler) UpdateMetadata(c *gin.Context) {
+	var req validator.UpdateMetadataRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		apperrors.AbortWithError(c, apperrors.NewValidationError("Invalid request data", err))
+		return
+	}
+
+	var asset models.Asset
+	if err := h.db.First(&asset, req.AssetID).Error; err != nil {
+		apperrors.AbortWithError(c, apperrors.NewNotFoundError("Asset not found"))
+		return
+	}
+
+	if asset.IsImmutable {
+		apperrors.AbortWithError(c, apperrors.NewForbiddenError("Metadata is immutable after minting"))
+		return
+	}
+
+	asset.MetadataURI = req.MetadataURI
+	asset.MetadataHash = req.MetadataHash
+	if err := h.db.Save(&asset).Error; err != nil {
+		apperrors.AbortWithError(c, apperrors.NewInternalError("Failed to update metadata"))
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message":       "Metadata updated successfully",
+		"metadata_uri":  asset.MetadataURI,
+		"metadata_hash": asset.MetadataHash,
+	})
+}
+
+// GetMetadata returns the metadata for an asset
+func (h *AssetHandler) GetMetadata(c *gin.Context) {
+	var uri validator.AssetIDUri
+	if err := c.ShouldBindUri(&uri); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid asset ID"})
+		return
+	}
+
+	var asset models.Asset
+	if err := h.db.First(&asset, uri.ID).Error; err != nil {
+		apperrors.AbortWithError(c, apperrors.NewNotFoundError("Asset not found"))
+		return
+	}
+
+	result := models.NFTMetadata{
+		Name:        asset.Name,
+		Description: asset.Description,
+		Image:       asset.ImageURL,
+		ExternalURL: asset.MetadataURI,
+		Attributes:  nil,
+	}
+
+	if asset.Metadata != "" {
+		var attrs []models.NFTAttribute
+		var props map[string]interface{}
+		if err := json.Unmarshal([]byte(asset.Metadata), &props); err == nil {
+			for k, v := range props {
+				attrs = append(attrs, models.NFTAttribute{
+					TraitType: k,
+					Value:     v,
+				})
+			}
+		}
+		result.Attributes = attrs
+		result.Properties = props
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"asset":         asset,
+		"nft_metadata":  result,
+		"metadata_uri":  asset.MetadataURI,
+		"metadata_hash": asset.MetadataHash,
+		"is_immutable":  asset.IsImmutable,
+		"ipfs_cid":      asset.IPFSCID,
+	})
+}
+
+// MakeMetadataImmutable marks asset metadata as immutable
+func (h *AssetHandler) MakeMetadataImmutable(c *gin.Context) {
+	var req validator.MakeImmutableRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		apperrors.AbortWithError(c, apperrors.NewValidationError("Invalid request data", err))
+		return
+	}
+
+	var asset models.Asset
+	if err := h.db.First(&asset, req.AssetID).Error; err != nil {
+		apperrors.AbortWithError(c, apperrors.NewNotFoundError("Asset not found"))
+		return
+	}
+
+	if asset.MetadataURI == "" {
+		apperrors.AbortWithError(c, apperrors.NewBadRequestError("Set metadata URI before making immutable"))
+		return
+	}
+
+	asset.IsImmutable = true
+	if err := h.db.Save(&asset).Error; err != nil {
+		apperrors.AbortWithError(c, apperrors.NewInternalError("Failed to make metadata immutable"))
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message":      "Metadata is now immutable",
+		"is_immutable": true,
+	})
+}
+
+// GetOraclePrice returns the current price from the oracle for an asset symbol
+func (h *AssetHandler) GetOraclePrice(c *gin.Context) {
+	symbol := c.Query("symbol")
+	if symbol == "" {
+		apperrors.AbortWithError(c, apperrors.NewBadRequestError("Symbol query parameter is required"))
+		return
+	}
+
+	oracleService := services.NewOraclePriceService()
+	feed, err := oracleService.FetchPrice(symbol)
+	if err != nil {
+		apperrors.AbortWithError(c, apperrors.NewExternalServiceError("Failed to fetch price from oracle", err))
+		return
+	}
+
+	c.JSON(http.StatusOK, feed)
+}
+
+// GetAssetOraclePrice returns the current oracle price for a specific asset
+func (h *AssetHandler) GetAssetOraclePrice(c *gin.Context) {
+	var uri validator.AssetIDUri
+	if err := c.ShouldBindUri(&uri); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid asset ID"})
+		return
+	}
+
+	var asset models.Asset
+	if err := h.db.First(&asset, uri.ID).Error; err != nil {
+		apperrors.AbortWithError(c, apperrors.NewNotFoundError("Asset not found"))
+		return
+	}
+
+	oracleService := services.NewOraclePriceService()
+	feed, err := oracleService.FetchPrice(asset.Symbol)
+	if err != nil {
+		apperrors.AbortWithError(c, apperrors.NewExternalServiceError("Failed to fetch price from oracle", err))
+		return
+	}
+
+	oracleService.UpdateFeed(asset.ID, feed)
+	staleDuration := 1 * time.Hour
+	isStale := oracleService.IsStale(asset.ID, staleDuration)
+
+	c.JSON(http.StatusOK, gin.H{
+		"asset_id":  asset.ID,
+		"symbol":    asset.Symbol,
+		"price":     feed.Price,
+		"source":    feed.Source,
+		"decimals":  feed.Decimals,
+		"timestamp": feed.Timestamp,
+		"is_stale":  isStale,
+	})
+}
+
+// ExecuteBatch processes a batch of transactions atomically
+func (h *AssetHandler) ExecuteBatch(c *gin.Context) {
+	userID, exists := c.Get("user_id")
+	if !exists {
+		apperrors.AbortWithError(c, apperrors.NewUnauthorizedError("User not authenticated"))
+		return
+	}
+
+	var req validator.BatchTransactionRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		apperrors.AbortWithError(c, apperrors.NewValidationError("Invalid batch request", err))
+		return
+	}
+
+	if len(req.Operations) == 0 {
+		apperrors.AbortWithError(c, apperrors.NewBadRequestError("Batch must contain at least one operation"))
+		return
+	}
+
+	if len(req.Operations) > 50 {
+		apperrors.AbortWithError(c, apperrors.NewBadRequestError("Batch cannot exceed 50 operations"))
+		return
+	}
+
+	operationsJSON, _ := json.Marshal(req.Operations)
+
+	batch := models.BatchTransaction{
+		UserID:          userID.(uint),
+		Operations:      string(operationsJSON),
+		Status:          "pending",
+		TotalOperations: len(req.Operations),
+	}
+
+	if err := h.db.Create(&batch).Error; err != nil {
+		apperrors.AbortWithError(c, apperrors.NewInternalError("Failed to create batch"))
+		return
+	}
+
+	var completedOps int
+	var failedOps int
+	var lastError string
+
+	tx := h.db.Begin()
+
+	for i, op := range req.Operations {
+		switch op.Type {
+		case "transfer":
+			var asset models.Asset
+			if err := tx.First(&asset, op.AssetID).Error; err != nil {
+				failedOps++
+				lastError = fmt.Sprintf("operation %d: asset not found", i)
+				continue
+			}
+
+			transaction := models.Transaction{
+				AssetID:     op.AssetID,
+				FromAddress: op.FromAddress,
+				ToAddress:   op.ToAddress,
+				Amount:      op.Amount,
+				TxHash:      fmt.Sprintf("batch_%d_op_%d", batch.ID, i),
+				Status:      "confirmed",
+			}
+			if err := tx.Create(&transaction).Error; err != nil {
+				failedOps++
+				lastError = fmt.Sprintf("operation %d: %v", i, err)
+				continue
+			}
+			completedOps++
+
+		case "list":
+			listing := models.Listing{
+				AssetID:      op.AssetID,
+				SellerAddr:   op.FromAddress,
+				Amount:       op.Amount,
+				PricePerUnit: 0,
+				Active:       true,
+				ListingID:    fmt.Sprintf("batch_listing_%d_%d", batch.ID, i),
+			}
+			if op.ExtraParams != nil {
+				if price, ok := op.ExtraParams["price_per_unit"].(float64); ok {
+					listing.PricePerUnit = int64(price)
+				}
+			}
+			if err := tx.Create(&listing).Error; err != nil {
+				failedOps++
+				lastError = fmt.Sprintf("operation %d: %v", i, err)
+				continue
+			}
+			completedOps++
+
+		case "cancel_listing":
+			var listingID string
+			if op.ExtraParams != nil {
+				if id, ok := op.ExtraParams["listing_id"].(string); ok {
+					listingID = id
+				}
+			}
+			if listingID == "" {
+				failedOps++
+				lastError = fmt.Sprintf("operation %d: listing_id required", i)
+				continue
+			}
+			if err := tx.Model(&models.Listing{}).Where("listing_id = ?", listingID).Update("active", false).Error; err != nil {
+				failedOps++
+				lastError = fmt.Sprintf("operation %d: %v", i, err)
+				continue
+			}
+			completedOps++
+
+		default:
+			failedOps++
+			lastError = fmt.Sprintf("operation %d: unsupported type %s", i, op.Type)
+		}
+	}
+
+	batch.CompletedCount = completedOps
+	batch.FailedCount = failedOps
+	batch.ErrorDetails = lastError
+
+	if failedOps > 0 && completedOps == 0 {
+		tx.Rollback()
+		batch.Status = "failed"
+		h.db.Save(&batch)
+		apperrors.AbortWithError(c, apperrors.NewBadRequestError("All batch operations failed: "+lastError))
+		return
+	}
+
+	if failedOps > 0 {
+		batch.Status = "completed_with_errors"
+	} else {
+		batch.Status = "completed"
+	}
+
+	tx.Commit()
+
+	batch.TxHash = fmt.Sprintf("batch_tx_%d", batch.ID)
+	h.db.Save(&batch)
+
+	c.JSON(http.StatusCreated, gin.H{
+		"message":          "Batch processed",
+		"batch_id":         batch.ID,
+		"status":           batch.Status,
+		"total_operations": batch.TotalOperations,
+		"completed":        completedOps,
+		"failed":           failedOps,
+		"tx_hash":          batch.TxHash,
+	})
+}
+
+// GetBatchStatus returns the status of a batch transaction
+func (h *AssetHandler) GetBatchStatus(c *gin.Context) {
+	batchID := c.Param("id")
+	if batchID == "" {
+		apperrors.AbortWithError(c, apperrors.NewBadRequestError("Batch ID is required"))
+		return
+	}
+
+	var batch models.BatchTransaction
+	if err := h.db.First(&batch, batchID).Error; err != nil {
+		apperrors.AbortWithError(c, apperrors.NewNotFoundError("Batch not found"))
+		return
+	}
+
+	c.JSON(http.StatusOK, batch)
+}
+
+// ListBatchTransactions returns batch transactions for the authenticated user
+func (h *AssetHandler) ListBatchTransactions(c *gin.Context) {
+	userID, exists := c.Get("user_id")
+	if !exists {
+		apperrors.AbortWithError(c, apperrors.NewUnauthorizedError("User not authenticated"))
+		return
+	}
+
+	var query validator.BatchStatusQuery
+	if err := c.ShouldBindQuery(&query); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	page := query.Page
+	if page == 0 {
+		page = 1
+	}
+	limit := query.Limit
+	if limit == 0 {
+		limit = 10
+	}
+
+	var batches []models.BatchTransaction
+	var total int64
+	dbQuery := h.db.Model(&models.BatchTransaction{}).Where("user_id = ?", userID).Order("created_at desc")
+	if query.Status != "" {
+		dbQuery = dbQuery.Where("status = ?", query.Status)
+	}
+
+	paginationRes, err := utils.Paginate(dbQuery, c, page, limit, &total, &batches)
+	if err != nil {
+		apperrors.AbortWithError(c, apperrors.NewDatabaseError("Failed to fetch batches", err))
+		return
+	}
+
+	c.JSON(http.StatusOK, paginationRes)
+}
+
 func (h *AssetHandler) notifyTransactionParticipants(transaction *models.Transaction) error {
 	participants := map[string]struct{}{}
 	for _, addr := range []string{transaction.FromAddress, transaction.ToAddress} {

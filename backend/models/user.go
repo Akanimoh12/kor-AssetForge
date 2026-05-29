@@ -30,6 +30,10 @@ type User struct {
 	EmailTokenExpires    time.Time      `json:"-"`
 	PasswordResetToken   string         `gorm:"index" json:"-"`
 	PasswordResetExpires time.Time      `json:"-"`
+	TOTPSecret           string         `gorm:"default:''" json:"-"`
+	TOTPEnabled          bool           `gorm:"default:false" json:"totp_enabled"`
+	TOTPVerified         bool           `gorm:"default:false" json:"-"`
+	BackupCodes          string         `gorm:"type:text" json:"-"`
 	LastLoginAt          *time.Time     `json:"last_login_at,omitempty"`
 	CreatedAt            time.Time      `json:"created_at"`
 	UpdatedAt            time.Time      `json:"updated_at"`
