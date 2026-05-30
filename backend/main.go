@@ -17,6 +17,7 @@ import (
 	_ "github.com/yourusername/kor-assetforge/docs"
 	"github.com/yourusername/kor-assetforge/handlers"
 	"github.com/yourusername/kor-assetforge/handlers/auth"
+	handlersv2 "github.com/yourusername/kor-assetforge/handlers/v2"
 	"github.com/yourusername/kor-assetforge/middleware"
 	"github.com/yourusername/kor-assetforge/models"
 	"github.com/yourusername/kor-assetforge/services"
@@ -121,6 +122,7 @@ func main() {
 		middleware.RequireJSON(),
 		middleware.RateLimit(20, time.Minute),
 		middleware.CSRFProtection(os.Getenv("CSRF_SECRET")),
+		middleware.VersionFromPath(), // attach api_version to every request context (#124)
 	)
 
 	// Health check handlers
@@ -144,8 +146,9 @@ func main() {
 	// Cache metrics
 	router.GET("/metrics/cache", middleware.CacheMetricsHandler(cacheManager))
 
-	// API v1 routes
+	// API v1 routes (deprecated — Deprecation + Sunset headers injected on all responses)
 	v1 := router.Group("/api/v1")
+	v1.Use(middleware.DeprecationWarning())
 	{
 		// Authentication routes (public)
 		authGroup := v1.Group("/auth")
@@ -296,10 +299,57 @@ func main() {
 		v1.GET("/liquidity/positions", liquidityHandler.GetLPPositions)
 		v1.GET("/liquidity/swaps", liquidityHandler.GetSwapHistory)
 
-		// Webhook routes
+		// Incoming webhook routes
 		webhookHandler := handlers.NewWebhookHandler(db)
 		router.POST("/webhooks/stellar-events", webhookHandler.HandleStellarEvent)
 		router.POST("/webhooks/kyc", kycHandler.HandleKYCWebhook)
+
+		// Outgoing webhook subscription routes (#126)
+		outgoingWebhookHandler := handlers.NewOutgoingWebhookHandler(db)
+		webhookSubs := protected.Group("/webhooks/subscriptions")
+		{
+			webhookSubs.POST("", outgoingWebhookHandler.CreateSubscription)
+			webhookSubs.GET("", outgoingWebhookHandler.ListSubscriptions)
+			webhookSubs.PUT("/:id", outgoingWebhookHandler.UpdateSubscription)
+			webhookSubs.DELETE("/:id", outgoingWebhookHandler.DeleteSubscription)
+			webhookSubs.GET("/:id/logs", outgoingWebhookHandler.GetDeliveryLogs)
+		}
+
+		// Notification routes (#123)
+		notificationHandler := handlers.NewNotificationHandler(db)
+		notifGroup := protected.Group("/notifications")
+		{
+			notifGroup.GET("", notificationHandler.ListNotifications)
+			notifGroup.GET("/unread-count", notificationHandler.UnreadCount)
+			notifGroup.PUT("/read-all", notificationHandler.MarkAllRead)
+			notifGroup.PUT("/:id/read", notificationHandler.MarkRead)
+			notifGroup.GET("/preferences", notificationHandler.GetPreferences)
+			notifGroup.PUT("/preferences", notificationHandler.UpdatePreference)
+		}
+
+		// Legal compliance routes (#120)
+		legalHandler := handlers.NewLegalHandler(db)
+		legalGroup := v1.Group("/legal")
+		{
+			legalGroup.GET("/:type", legalHandler.GetActiveDocument)
+			legalGroup.GET("/:type/versions", legalHandler.ListDocumentVersions)
+		}
+		legalProtected := protected.Group("/legal")
+		{
+			legalProtected.POST("/consent", legalHandler.RecordConsent)
+			legalProtected.GET("/consent/history", legalHandler.GetConsentHistory)
+			legalProtected.GET("/consent/pending", legalHandler.CheckPendingConsents)
+			legalProtected.POST("/gdpr/export", legalHandler.RequestDataExport)
+			legalProtected.GET("/gdpr/export/:id", legalHandler.GetDataExportStatus)
+		}
+	}
+
+	// API v2 routes (#124)
+	v2 := router.Group("/api/v2")
+	{
+		v2AssetsHandler := handlersv2.NewAssetsHandler(db)
+		v2.GET("/assets", v2AssetsHandler.ListAssets)
+		v2.GET("/assets/:id", v2AssetsHandler.GetAsset)
 	}
 
 	// WebSocket routes (#54) — outside v1 group so the CSRF/JSON middleware
