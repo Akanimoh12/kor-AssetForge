@@ -21,6 +21,11 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/google/uuid"
 	"go.uber.org/zap"
+
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
+	"io"
 )
 
 // ---------------------------------------------------------------------------
@@ -84,6 +89,10 @@ type FileStorageService struct {
 	cdnBase     string
 	maxFileSize int64
 	logger      *zap.SugaredLogger
+
+	encryptor *FileEncryptor
+	scanner   VirusScanner
+
 }
 
 // FileStorageConfig groups the configuration required to instantiate a
@@ -97,6 +106,21 @@ type FileStorageConfig struct {
 	Bucket          string
 	CDNBase         string // optional CDN prefix, e.g. "https://cdn.example.com"
 	MaxFileSizeBytes int64 // 0 → defaultMaxFileSizeBytes
+
+	Provider string
+}
+
+
+type VirusScanner interface {
+	Scan(ctx context.Context, file []byte) error
+}
+
+type FileEncryptor struct {
+	key []byte
+}
+
+func NewFileEncryptor(key []byte) *FileEncryptor {
+	return &FileEncryptor{key: key}
 }
 
 // NewFileStorageServiceFromEnv reads S3 configuration from environment
@@ -129,12 +153,63 @@ func NewFileStorageServiceFromEnv(logger *zap.SugaredLogger) (*FileStorageServic
 	return NewFileStorageService(cfg, logger)
 }
 
+func encryptAESGCM(key, plaintext []byte) ([]byte, error) {
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, err
+	}
+
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, err
+	}
+
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+		return nil, err
+	}
+
+	ciphertext := gcm.Seal(nonce, nonce, plaintext, nil)
+	return ciphertext, nil
+}
+
+func decryptAESGCM(key, data []byte) ([]byte, error) {
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, err
+	}
+
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, err
+	}
+
+	nonceSize := gcm.NonceSize()
+	if len(data) < nonceSize {
+		return nil, errors.New("ciphertext too short")
+	}
+
+	nonce, ciphertext := data[:nonceSize], data[nonceSize:]
+	return gcm.Open(nil, nonce, ciphertext, nil)
+}
+
+
 // NewFileStorageService constructs a FileStorageService from an explicit config.
 func NewFileStorageService(cfg FileStorageConfig, logger *zap.SugaredLogger) (*FileStorageService, error) {
 	maxSize := cfg.MaxFileSizeBytes
 	if maxSize <= 0 {
 		maxSize = defaultMaxFileSizeBytes
 	}
+
+	encKey := os.Getenv("FILE_ENCRYPTION_KEY")
+	if len(encKey) != 32 {
+		return nil, errors.New("file storage: FILE_ENCRYPTION_KEY must be 32 bytes")
+	}
+
+	encryptor := NewFileEncryptor([]byte(encKey))
+
+
+	var scanner VirusScanner = nil
 
 	awsCfg, err := awsconfig.LoadDefaultConfig(
 		context.Background(),
@@ -163,6 +238,9 @@ func NewFileStorageService(cfg FileStorageConfig, logger *zap.SugaredLogger) (*F
 		cdnBase:     cfg.CDNBase,
 		maxFileSize: maxSize,
 		logger:      logger,
+
+		encryptor: encryptor,
+		scanner:   scanner,
 	}, nil
 }
 
@@ -200,9 +278,16 @@ func (s *FileStorageService) Upload(
 	if err != nil {
 		return nil, fmt.Errorf("file storage: failed to read file: %w", err)
 	}
+
+	if len(body) == 0 {
+		return nil, errors.New("file storage: empty file not allowed")
+	}
+
 	if int64(len(body)) > s.maxFileSize {
 		return nil, fmt.Errorf("file storage: file size exceeds limit of %d bytes", s.maxFileSize)
 	}
+	
+
 
 	// Detect MIME from content (ignores client-supplied Content-Type).
 	detectedMIME := http.DetectContentType(body[:min(512, len(body))])
@@ -227,9 +312,23 @@ func (s *FileStorageService) Upload(
 		}
 	}
 
+	if s.scanner != nil {
+		if err := s.scanner.Scan(ctx, body); err != nil {
+			return nil, fmt.Errorf("file storage: virus detected: %w", err)
+		}
+	}
+	
+
 	// Compute SHA-256 checksum for integrity and deduplication.
 	hash := sha256.Sum256(body)
 	hashHex := hex.EncodeToString(hash[:])
+
+
+
+	encryptedBody, err := encryptAESGCM(s.encryptor.key, body)
+	if err != nil {
+		return nil, fmt.Errorf("file storage: encryption failed: %w", err)
+	}
 
 	fileID := uuid.New().String()
 	storedKey := buildStorageKey(purpose, assetID, fileID, ext)
@@ -238,7 +337,7 @@ func (s *FileStorageService) Upload(
 	if _, err := s.client.PutObject(ctx, &s3.PutObjectInput{
 		Bucket:      aws.String(s.bucket),
 		Key:         aws.String(storedKey),
-		Body:        bytes.NewReader(body),
+		Body:        bytes.NewReader(encryptedBody),
 		ContentType: aws.String(detectedMIME),
 		Metadata: map[string]string{
 			"uploader-id":   uploaderID,
