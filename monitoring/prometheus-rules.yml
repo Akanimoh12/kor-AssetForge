@@ -33,6 +33,15 @@ groups:
           summary: "Database errors detected"
           description: "Database error rate is {{ $value }} errors/sec"
 
+      - alert: DatabaseConnectionPoolExhausted
+        expr: db_pool_in_use_connections / clamp_min(db_pool_max_open_connections, 1) > 0.9
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Database connection pool is near exhaustion"
+          description: "More than 90% of configured database connections are in use."
+
       - alert: CacheIneffective
         expr: |
           (sum(rate(cache_misses_total[5m])) by (cache_type))

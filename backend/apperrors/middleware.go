@@ -7,6 +7,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 )
 
 var Logger *zap.Logger
@@ -16,7 +17,7 @@ func init() {
 	config := zap.NewProductionConfig()
 	config.OutputPaths = []string{"stdout"}
 	config.EncoderConfig.TimeKey = "timestamp"
-	config.EncoderConfig.EncodeTime = zap.ISO8601TimeEncoder
+	config.EncoderConfig.EncodeTime = zapcore.ISO8601TimeEncoder
 	Logger, err = config.Build()
 	if err != nil {
 		panic(err)

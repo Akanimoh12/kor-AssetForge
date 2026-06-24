@@ -4,42 +4,50 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/yourusername/kor-assetforge/models"
 
-	"github.com/elastic/go-elasticsearch/v8/typesapi"
+	"github.com/elastic/go-elasticsearch/v8"
 	"gorm.io/gorm"
 )
 
 // SearchRequest contains all filter / sort / pagination parameters.
 type SearchRequest struct {
-	Query      string  `form:"q"`
-	AssetType  string  `form:"asset_type"`
-	MinPrice   *int64  `form:"min_price"`
-	MaxPrice   *int64  `form:"max_price"`
-	Verified   *bool   `form:"verified"`
-	SortBy     string  `form:"sort_by"`  // name | created_at | total_supply | fractions
-	Order      string  `form:"order"`    // asc | desc
-	Page       int     `form:"page"`
-	Limit      int     `form:"limit"`
+	Query       string            `form:"q"`
+	AssetType   string            `form:"asset_type"` // compatibility with a single-value client
+	AssetTypes  []string          `form:"asset_type"`
+	MinPrice    *int64            `form:"min_price"`
+	MaxPrice    *int64            `form:"max_price"`
+	Location    string            `form:"location"`
+	Locations   []string          `form:"location"`
+	CreatedFrom *time.Time        `form:"created_from" time_format:"2006-01-02"`
+	CreatedTo   *time.Time        `form:"created_to" time_format:"2006-01-02"`
+	Verified    *bool             `form:"verified"`
+	Metadata    map[string]string `form:"-"`
+	SortBy      string            `form:"sort_by"` // name | created_at | total_supply | fractions
+	Order       string            `form:"order"`   // asc | desc
+	Page        int               `form:"page"`
+	Limit       int               `form:"limit"`
 }
 
 // SearchResult is the paginated response envelope.
 type SearchResult struct {
-	Total   int64          `json:"total"`
-	Page    int            `json:"page"`
-	Limit   int            `json:"limit"`
-	Assets  []models.Asset `json:"assets"`
-	Facets  SearchFacets   `json:"facets"`
-	Took    float64        `json:"took_ms"` // query duration in milliseconds
+	Total  int64          `json:"total"`
+	Page   int            `json:"page"`
+	Limit  int            `json:"limit"`
+	Assets []models.Asset `json:"assets"`
+	Facets SearchFacets   `json:"facets"`
+	Took   float64        `json:"took_ms"` // query duration in milliseconds
 }
 
 // SearchFacets carries aggregated filter counts for faceted navigation.
 type SearchFacets struct {
 	AssetTypes []FacetBucket `json:"asset_types"`
-	Verified   FacetBucket   `json:"verified"`
+	Locations  []FacetBucket `json:"locations"`
+	Verified   []FacetBucket `json:"verified"`
 }
 
 // FacetBucket is a single facet value with its document count.
@@ -90,6 +98,10 @@ type DBSearchBackend struct {
 func NewDBSearchBackend(db *gorm.DB) SearchBackend { return &DBSearchBackend{db: db} }
 
 func (s *DBSearchBackend) Search(ctx context.Context, req *SearchRequest) (*SearchResult, error) {
+	if err := req.Validate(); err != nil {
+		return nil, err
+	}
+	req.normalizePagination()
 	q := s.db.WithContext(ctx).Model(&models.Asset{})
 
 	// Full-text filter across name, symbol, description, asset_type
@@ -102,13 +114,26 @@ func (s *DBSearchBackend) Search(ctx context.Context, req *SearchRequest) (*Sear
 	}
 
 	// Exact asset-type filter
-	if req.AssetType != "" {
-		q = q.Where("asset_type = ?", req.AssetType)
+	if types := req.assetTypes(); len(types) > 0 {
+		q = q.Where("asset_type IN ?", types)
 	}
 
 	// Verified flag
 	if req.Verified != nil {
 		q = q.Where("verified = ?", *req.Verified)
+	}
+	if locations := req.locations(); len(locations) > 0 {
+		q = q.Where("NULLIF(metadata, '')::jsonb ->> 'location' IN ?", locations)
+	}
+	if req.CreatedFrom != nil {
+		q = q.Where("created_at >= ?", req.CreatedFrom.UTC())
+	}
+	if req.CreatedTo != nil {
+		q = q.Where("created_at < ?", req.CreatedTo.UTC().Add(24*time.Hour))
+	}
+	for key, value := range req.Metadata {
+		metadataFilter, _ := json.Marshal(map[string]string{key: value})
+		q = q.Where("NULLIF(metadata, '')::jsonb @> ?::jsonb", string(metadataFilter))
 	}
 
 	// Price range via subquery on active listings — avoids duplicate rows from JOIN
@@ -216,12 +241,84 @@ func (s *DBSearchBackend) buildFacets(ctx context.Context, req *SearchRequest) S
 	for _, b := range buckets {
 		typeFacets = append(typeFacets, FacetBucket{Value: b.AssetType, Count: b.Count})
 	}
+	type locationBucket struct {
+		Location string
+		Count    int64
+	}
+	var locations []locationBucket
+	s.db.WithContext(ctx).Model(&models.Asset{}).Where("metadata IS NOT NULL AND metadata <> ''").
+		Select("NULLIF(metadata, '')::jsonb ->> 'location' as location, COUNT(*) as count").Where("NULLIF(metadata, '')::jsonb ->> 'location' IS NOT NULL").Group("location").Scan(&locations)
+	locationFacets := make([]FacetBucket, 0, len(locations))
+	for _, b := range locations {
+		locationFacets = append(locationFacets, FacetBucket{Value: b.Location, Count: b.Count})
+	}
+	sort.Slice(typeFacets, func(i, j int) bool { return typeFacets[i].Value < typeFacets[j].Value })
+	sort.Slice(locationFacets, func(i, j int) bool { return locationFacets[i].Value < locationFacets[j].Value })
 
-	_ = req // reserved for future range-aware facets
+	_ = req
 	return SearchFacets{
 		AssetTypes: typeFacets,
-		Verified:   FacetBucket{Value: "true", Count: verifiedCount},
+		Locations:  locationFacets,
+		Verified:   []FacetBucket{{Value: "true", Count: verifiedCount}, {Value: "false", Count: unverifiedCount}},
 	}
+}
+
+func (req *SearchRequest) Validate() error {
+	if req.MinPrice != nil && *req.MinPrice < 0 {
+		return fmt.Errorf("min_price must not be negative")
+	}
+	if req.MaxPrice != nil && *req.MaxPrice < 0 {
+		return fmt.Errorf("max_price must not be negative")
+	}
+	if req.MinPrice != nil && req.MaxPrice != nil && *req.MinPrice > *req.MaxPrice {
+		return fmt.Errorf("min_price cannot exceed max_price")
+	}
+	if req.CreatedFrom != nil && req.CreatedTo != nil && req.CreatedFrom.After(*req.CreatedTo) {
+		return fmt.Errorf("created_from cannot be after created_to")
+	}
+	if len(req.Metadata) > 10 {
+		return fmt.Errorf("at most 10 metadata filters are allowed")
+	}
+	for key, value := range req.Metadata {
+		if strings.TrimSpace(key) == "" || len(key) > 64 || len(value) > 256 {
+			return fmt.Errorf("invalid metadata filter")
+		}
+	}
+	if req.SortBy != "" && !map[string]bool{"name": true, "created_at": true, "total_supply": true, "fractions": true}[req.SortBy] {
+		return fmt.Errorf("invalid sort_by")
+	}
+	if req.Order != "" && strings.ToLower(req.Order) != "asc" && strings.ToLower(req.Order) != "desc" {
+		return fmt.Errorf("order must be asc or desc")
+	}
+	return nil
+}
+
+func (req *SearchRequest) normalizePagination() {
+	if req.Page < 1 {
+		req.Page = 1
+	}
+	if req.Limit < 1 || req.Limit > 100 {
+		req.Limit = 10
+	}
+}
+
+func (req *SearchRequest) assetTypes() []string {
+	if len(req.AssetTypes) > 0 {
+		return req.AssetTypes
+	}
+	if req.AssetType != "" {
+		return []string{req.AssetType}
+	}
+	return nil
+}
+func (req *SearchRequest) locations() []string {
+	if len(req.Locations) > 0 {
+		return req.Locations
+	}
+	if req.Location != "" {
+		return []string{req.Location}
+	}
+	return nil
 }
 
 // IndexAsset is a no-op for the DB backend
@@ -248,22 +345,24 @@ func (s *DBSearchBackend) RecordAnalytics(ctx context.Context, event *SearchAnal
 
 // AssetDocument represents how an asset is indexed in Elasticsearch
 type AssetDocument struct {
-	ID            uint                   `json:"id"`
-	Name          string                 `json:"name"`
-	Symbol        string                 `json:"symbol"`
-	Description   string                 `json:"description"`
-	AssetType     string                 `json:"asset_type"`
-	TotalSupply   int64                  `json:"total_supply"`
-	Fractions     uint64                 `json:"fractions"`
-	ContractID    string                 `json:"contract_id"`
-	OwnerAddress  string                 `json:"owner_address"`
-	Metadata      map[string]string      `json:"metadata"`
-	ImageURL      string                 `json:"image_url"`
-	DocumentURL   string                 `json:"document_url"`
-	Verified      bool                   `json:"verified"`
-	CreatedAt     time.Time              `json:"created_at"`
-	UpdatedAt     time.Time              `json:"updated_at"`
-	SearchText    string                 `json:"search_text"`
+	ID           uint              `json:"id"`
+	Name         string            `json:"name"`
+	Symbol       string            `json:"symbol"`
+	Description  string            `json:"description"`
+	AssetType    string            `json:"asset_type"`
+	TotalSupply  int64             `json:"total_supply"`
+	Fractions    uint64            `json:"fractions"`
+	ContractID   string            `json:"contract_id"`
+	OwnerAddress string            `json:"owner_address"`
+	Metadata     map[string]string `json:"metadata"`
+	Location     string            `json:"location"`
+	CurrentPrice int64             `json:"current_price"`
+	ImageURL     string            `json:"image_url"`
+	DocumentURL  string            `json:"document_url"`
+	Verified     bool              `json:"verified"`
+	CreatedAt    time.Time         `json:"created_at"`
+	UpdatedAt    time.Time         `json:"updated_at"`
+	SearchText   string            `json:"search_text"`
 }
 
 // ESSearchBackend integrates with Elasticsearch with transparent fallback to DB
@@ -345,22 +444,24 @@ func (es *ESSearchBackend) initializeIndex(ctx context.Context) error {
 		},
 		"mappings": map[string]interface{}{
 			"properties": map[string]interface{}{
-				"id":             map[string]interface{}{"type": "keyword"},
-				"name":           map[string]interface{}{"type": "text", "analyzer": "asset_analyzer", "fields": map[string]interface{}{"keyword": map[string]interface{}{"type": "keyword"}}},
-				"symbol":         map[string]interface{}{"type": "keyword"},
-				"description":    map[string]interface{}{"type": "text", "analyzer": "asset_analyzer"},
-				"asset_type":     map[string]interface{}{"type": "keyword"},
-				"total_supply":   map[string]interface{}{"type": "long"},
-				"fractions":      map[string]interface{}{"type": "long"},
-				"contract_id":    map[string]interface{}{"type": "keyword"},
-				"owner_address":  map[string]interface{}{"type": "keyword"},
-				"metadata":       map[string]interface{}{"type": "object"},
-				"image_url":      map[string]interface{}{"type": "keyword"},
-				"document_url":   map[string]interface{}{"type": "keyword"},
-				"verified":       map[string]interface{}{"type": "boolean"},
-				"created_at":     map[string]interface{}{"type": "date"},
-				"updated_at":     map[string]interface{}{"type": "date"},
-				"search_text":    map[string]interface{}{"type": "text", "analyzer": "asset_analyzer"},
+				"id":            map[string]interface{}{"type": "keyword"},
+				"name":          map[string]interface{}{"type": "text", "analyzer": "asset_analyzer", "fields": map[string]interface{}{"keyword": map[string]interface{}{"type": "keyword"}}},
+				"symbol":        map[string]interface{}{"type": "keyword"},
+				"description":   map[string]interface{}{"type": "text", "analyzer": "asset_analyzer"},
+				"asset_type":    map[string]interface{}{"type": "keyword"},
+				"total_supply":  map[string]interface{}{"type": "long"},
+				"fractions":     map[string]interface{}{"type": "long"},
+				"contract_id":   map[string]interface{}{"type": "keyword"},
+				"owner_address": map[string]interface{}{"type": "keyword"},
+				"metadata":      map[string]interface{}{"type": "object"},
+				"location":      map[string]interface{}{"type": "keyword"},
+				"current_price": map[string]interface{}{"type": "long"},
+				"image_url":     map[string]interface{}{"type": "keyword"},
+				"document_url":  map[string]interface{}{"type": "keyword"},
+				"verified":      map[string]interface{}{"type": "boolean"},
+				"created_at":    map[string]interface{}{"type": "date"},
+				"updated_at":    map[string]interface{}{"type": "date"},
+				"search_text":   map[string]interface{}{"type": "text", "analyzer": "asset_analyzer"},
 			},
 		},
 	}
@@ -375,6 +476,15 @@ func (es *ESSearchBackend) initializeIndex(ctx context.Context) error {
 }
 
 func (es *ESSearchBackend) Search(ctx context.Context, req *SearchRequest) (*SearchResult, error) {
+	if err := req.Validate(); err != nil {
+		return nil, err
+	}
+	// Listings are the price authority and custom metadata is stored as JSON in
+	// PostgreSQL. Use the DB planner for combinations that ES cannot join safely.
+	if req.MinPrice != nil || req.MaxPrice != nil || len(req.Metadata) > 0 {
+		return es.dbBackend.Search(ctx, req)
+	}
+	req.normalizePagination()
 	if es.client == nil {
 		return es.dbBackend.Search(ctx, req)
 	}
@@ -391,7 +501,7 @@ func (es *ESSearchBackend) Search(ctx context.Context, req *SearchRequest) (*Sea
 		es.client.Search.WithIndex(es.indexName),
 		es.client.Search.WithBody(strings.NewReader(string(body))),
 		es.client.Search.WithSize(req.Limit),
-		es.client.Search.WithFrom((req.Page - 1) * req.Limit),
+		es.client.Search.WithFrom((req.Page-1)*req.Limit),
 	)
 
 	if err != nil || res.IsError() {
@@ -475,8 +585,8 @@ func (es *ESSearchBackend) Suggest(ctx context.Context, query string, limit int)
 			"asset-suggest": map[string]interface{}{
 				"prefix": term,
 				"completion": map[string]interface{}{
-					"field": "name.completion",
-					"size":  limit,
+					"field":           "name.completion",
+					"size":            limit,
 					"skip_duplicates": true,
 				},
 			},
@@ -542,6 +652,7 @@ func (es *ESSearchBackend) IndexAsset(ctx context.Context, asset *models.Asset) 
 		ContractID:   asset.ContractID,
 		OwnerAddress: asset.OwnerAddress,
 		Metadata:     metadata,
+		Location:     metadata["location"],
 		ImageURL:     asset.ImageURL,
 		DocumentURL:  asset.DocumentURL,
 		Verified:     asset.Verified,
@@ -630,20 +741,33 @@ func (es *ESSearchBackend) buildESQuery(req *SearchRequest) map[string]interface
 	if term := strings.TrimSpace(req.Query); term != "" {
 		filters = append(filters, map[string]interface{}{
 			"multi_match": map[string]interface{}{
-				"query":  term,
-				"fields": []string{"name^3", "symbol^2", "description", "search_text"},
+				"query":     term,
+				"fields":    []string{"name^3", "symbol^2", "description", "search_text"},
 				"fuzziness": "AUTO",
 			},
 		})
 	}
 
 	// Asset type filter
-	if req.AssetType != "" {
+	if types := req.assetTypes(); len(types) > 0 {
 		filters = append(filters, map[string]interface{}{
-			"term": map[string]interface{}{
-				"asset_type": req.AssetType,
+			"terms": map[string]interface{}{
+				"asset_type": types,
 			},
 		})
+	}
+	if locations := req.locations(); len(locations) > 0 {
+		filters = append(filters, map[string]interface{}{"terms": map[string]interface{}{"location": locations}})
+	}
+	if req.CreatedFrom != nil || req.CreatedTo != nil {
+		dateRange := map[string]interface{}{}
+		if req.CreatedFrom != nil {
+			dateRange["gte"] = req.CreatedFrom.UTC().Format(time.RFC3339)
+		}
+		if req.CreatedTo != nil {
+			dateRange["lt"] = req.CreatedTo.UTC().Add(24 * time.Hour).Format(time.RFC3339)
+		}
+		filters = append(filters, map[string]interface{}{"range": map[string]interface{}{"created_at": dateRange}})
 	}
 
 	// Verified status filter

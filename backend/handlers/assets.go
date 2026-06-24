@@ -14,6 +14,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/redis/go-redis/v9"
 	"github.com/yourusername/kor-assetforge/apperrors"
+	"github.com/yourusername/kor-assetforge/middleware"
 	"github.com/yourusername/kor-assetforge/models"
 	"github.com/yourusername/kor-assetforge/services"
 	"github.com/yourusername/kor-assetforge/utils"
@@ -26,15 +27,20 @@ type AssetHandler struct {
 	stellarClient *utils.StellarClient
 	redisClient   *redis.Client
 	emailService  services.EmailService
+	workflow      *services.WorkflowService
 }
 
-func NewAssetHandler(db *gorm.DB, stellarClient *utils.StellarClient, redisClient *redis.Client, emailService services.EmailService) *AssetHandler {
-	return &AssetHandler{
+func NewAssetHandler(db *gorm.DB, stellarClient *utils.StellarClient, redisClient *redis.Client, emailService services.EmailService, workflow ...*services.WorkflowService) *AssetHandler {
+	handler := &AssetHandler{
 		db:            db,
 		stellarClient: stellarClient,
 		redisClient:   redisClient,
 		emailService:  emailService,
 	}
+	if len(workflow) > 0 {
+		handler.workflow = workflow[0]
+	}
+	return handler
 }
 
 // TokenizeAsset handles formal asset tokenization with Soroban integration
@@ -82,6 +88,8 @@ func (h *AssetHandler) TokenizeAsset(c *gin.Context) {
 		apperrors.AbortWithError(c, apperrors.Wrap(err, apperrors.CodeDatabaseError, "Failed to create asset record", http.StatusInternalServerError))
 		return
 	}
+	c.Set("audit_asset_id", asset.ID)
+	middleware.SetAssetAuditState(c, nil, asset)
 
 	if h.redisClient != nil {
 		ctx := context.Background()
@@ -103,6 +111,8 @@ func (h *AssetHandler) TokenizeAsset(c *gin.Context) {
 	}
 
 	h.db.Model(&asset).Update("verified", true)
+	asset.Verified = true
+	middleware.SetAssetAuditState(c, nil, asset)
 
 	c.JSON(http.StatusCreated, gin.H{
 		"message": "Asset tokenized successfully",
@@ -255,6 +265,8 @@ func (h *AssetHandler) GetAsset(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Asset not found"})
 		return
 	}
+	c.Set("audit_asset_id", asset.ID)
+	middleware.SetAssetAuditState(c, nil, asset)
 
 	// Save to Redis
 	if h.redisClient != nil {
@@ -300,7 +312,6 @@ func (h *AssetHandler) ListAssetForSale(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Asset not found"})
 		return
 	}
-
 	listingID := "listing_1"
 	listing := models.Listing{
 		AssetID:      req.AssetID,
@@ -358,6 +369,22 @@ func (h *AssetHandler) TransferAsset(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Asset not found"})
 		return
 	}
+	c.Set("audit_asset_id", asset.ID)
+	if h.workflow != nil {
+		if requester, ok := c.Get("user_id"); ok {
+			if userID, ok := requester.(uint); ok {
+				approval, err := h.workflow.CreateTransferRequest(c.Request.Context(), userID, services.TransferApprovalInput{AssetID: req.AssetID, FromAddress: req.FromAddress, ToAddress: req.ToAddress, Amount: req.Amount})
+				if err == nil {
+					c.JSON(http.StatusAccepted, gin.H{"message": "transfer awaiting approval", "approval_request": approval})
+					return
+				}
+				if !errors.Is(err, services.ErrNoMatchingWorkflow) {
+					c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create approval request"})
+					return
+				}
+			}
+		}
+	}
 
 	txHash := "tx_hash_placeholder"
 	transaction := models.Transaction{
@@ -404,6 +431,7 @@ func (h *AssetHandler) UpdateMetadata(c *gin.Context) {
 		apperrors.AbortWithError(c, apperrors.NewNotFoundError("Asset not found"))
 		return
 	}
+	before := asset
 
 	if asset.IsImmutable {
 		apperrors.AbortWithError(c, apperrors.NewForbiddenError("Metadata is immutable after minting"))
@@ -416,6 +444,8 @@ func (h *AssetHandler) UpdateMetadata(c *gin.Context) {
 		apperrors.AbortWithError(c, apperrors.NewInternalError("Failed to update metadata"))
 		return
 	}
+	c.Set("audit_asset_id", asset.ID)
+	middleware.SetAssetAuditState(c, before, asset)
 
 	c.JSON(http.StatusOK, gin.H{
 		"message":       "Metadata updated successfully",
@@ -484,6 +514,7 @@ func (h *AssetHandler) MakeMetadataImmutable(c *gin.Context) {
 		apperrors.AbortWithError(c, apperrors.NewNotFoundError("Asset not found"))
 		return
 	}
+	before := asset
 
 	if asset.MetadataURI == "" {
 		apperrors.AbortWithError(c, apperrors.NewBadRequestError("Set metadata URI before making immutable"))
@@ -495,6 +526,8 @@ func (h *AssetHandler) MakeMetadataImmutable(c *gin.Context) {
 		apperrors.AbortWithError(c, apperrors.NewInternalError("Failed to make metadata immutable"))
 		return
 	}
+	c.Set("audit_asset_id", asset.ID)
+	middleware.SetAssetAuditState(c, before, asset)
 
 	c.JSON(http.StatusOK, gin.H{
 		"message":      "Metadata is now immutable",

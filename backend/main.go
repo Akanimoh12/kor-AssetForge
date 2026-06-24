@@ -20,6 +20,7 @@ import (
 	handlersv2 "github.com/yourusername/kor-assetforge/handlers/v2"
 	"github.com/yourusername/kor-assetforge/middleware"
 	"github.com/yourusername/kor-assetforge/models"
+	"github.com/yourusername/kor-assetforge/monitoring"
 	"github.com/yourusername/kor-assetforge/services"
 	"github.com/yourusername/kor-assetforge/utils"
 	"github.com/yourusername/kor-assetforge/validator"
@@ -55,6 +56,13 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to connect to database: %v", err)
 	}
+	if poolMetrics, err := monitoring.NewDBPoolMetrics(db); err != nil {
+		log.Printf("Warning: database pool metrics unavailable: %v", err)
+	} else {
+		poolMetrics.Start(context.Background())
+	}
+	auditService := middleware.NewAuditService(db)
+	middleware.StartAuditMaintenance(context.Background(), auditService)
 
 	// Initialize Stellar client
 	stellarClient, err := config.InitStellarClient()
@@ -123,6 +131,7 @@ func main() {
 		middleware.RateLimit(20, time.Minute),
 		middleware.CSRFProtection(os.Getenv("CSRF_SECRET")),
 		middleware.VersionFromPath(), // attach api_version to every request context (#124)
+		middleware.AuditMiddleware(auditService),
 	)
 
 	// Health check handlers
@@ -165,6 +174,8 @@ func main() {
 		// Protected user routes
 		protected := v1.Group("")
 		protected.Use(authMiddleware.JWTAuth())
+		adminGroup := protected.Group("")
+		adminGroup.Use(authMiddleware.RequireRole(models.RoleAdmin))
 		{
 			protected.GET("/profile", authHandler.GetProfile)
 			protected.POST("/logout", authHandler.Logout)
@@ -175,8 +186,6 @@ func main() {
 			protected.POST("/auth/2fa/disable", authHandler.Disable2FA)
 
 			// Admin-only routes
-			adminGroup := protected.Group("")
-			adminGroup.Use(authMiddleware.RequireRole(models.RoleAdmin))
 			{
 				// Dispute admin endpoints — handlers declared below, referenced via closures
 				adminGroup.PUT("/disputes/:id/review", func(c *gin.Context) {
@@ -196,7 +205,8 @@ func main() {
 		v1.POST("/auth/2fa/login", authHandler.LoginWith2FA)
 
 		// Asset routes (with write-through cache invalidation)
-		assetHandler := handlers.NewAssetHandler(db, stellarClient, redisClient, emailService)
+		workflowService := services.NewWorkflowService(db, emailService)
+		assetHandler := handlers.NewAssetHandler(db, stellarClient, redisClient, emailService, workflowService)
 		v1.POST("/assets/tokenize",
 			middleware.InvalidateOnWrite(cacheManager, "kor:asset:*"),
 			assetHandler.TokenizeAsset)
@@ -244,16 +254,46 @@ func main() {
 			middleware.InvalidateOnWrite(cacheManager, "kor:asset:*"),
 			assetHandler.ListAssetForSale)
 		v1.POST("/marketplace/transfer",
+			authMiddleware.JWTAuth(),
 			middleware.InvalidateOnWrite(cacheManager, "kor:asset:*"),
 			assetHandler.TransferAsset)
 		v1.GET("/transactions", assetHandler.ListTransactions)
 
 		// Search routes (#57)
-		searchBackend := services.NewESSearchBackend(os.Getenv("ELASTICSEARCH_URL"), db)
+		searchBackend, searchErr := services.NewESSearchBackend(os.Getenv("ELASTICSEARCH_URL"), db)
+		if searchErr != nil {
+			log.Printf("Warning: Elasticsearch disabled: %v", searchErr)
+			searchBackend = services.NewDBSearchBackend(db)
+		}
 		searchHandler := handlers.NewSearchHandler(searchBackend)
 		v1.GET("/search/assets", searchHandler.Search)
 		v1.GET("/search/suggestions", searchHandler.Suggest)
 		v1.GET("/search/analytics", searchHandler.SearchAnalytics)
+
+		// Configurable transfer-approval workflow routes (#155).
+		approvalHandler := handlers.NewApprovalHandler(workflowService)
+		approvalRoutes := protected.Group("/approvals")
+		{
+			approvalRoutes.POST("/requests", approvalHandler.CreateRequest)
+			approvalRoutes.GET("/requests", approvalHandler.ListRequests)
+			approvalRoutes.GET("/requests/:id", approvalHandler.GetRequest)
+			approvalRoutes.POST("/requests/:id/decisions", approvalHandler.Decide)
+			approvalRoutes.POST("/requests/:id/delegate", approvalHandler.Delegate)
+		}
+		approvalAdmin := adminGroup.Group("/approvals")
+		{
+			approvalAdmin.POST("/workflows", approvalHandler.CreateWorkflow)
+			approvalAdmin.GET("/workflows", approvalHandler.ListWorkflows)
+			approvalAdmin.POST("/expire", approvalHandler.ExpireTimedOut)
+		}
+
+		// Compliance audit retrieval/export is restricted to administrators.
+		auditHandler := handlers.NewAuditHandler(auditService)
+		auditRoutes := adminGroup.Group("/audit/assets")
+		{
+			auditRoutes.GET("", auditHandler.List)
+			auditRoutes.GET("/export", auditHandler.Export)
+		}
 
 		// KYC / AML routes (#55)
 		kycHandler := handlers.NewKYCHandler(db, nil, emailService) // nil = mock provider

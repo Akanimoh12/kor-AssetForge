@@ -34,18 +34,26 @@ type EmailService interface {
 	SendVerificationEmail(toEmail, toName, verificationToken string) error
 	SendKYCStatusUpdate(toEmail, toName, status, reviewNotes string) error
 	SendTransactionConfirmation(toEmail, toName, txHash string, amount int64, assetID uint, fromAddress, toAddress string) error
+	SendApprovalPendingEmail(toEmail, toName string, requestID uint, expiresAt time.Time) error
+}
+
+func (s *emailService) SendApprovalPendingEmail(toEmail, toName string, requestID uint, expiresAt time.Time) error {
+	subject := "Asset transfer approval required"
+	plain := fmt.Sprintf("Hi %s,\n\nApproval request #%d is waiting for your decision. It expires at %s.\n", toName, requestID, expiresAt.Format(time.RFC3339))
+	html := fmt.Sprintf("<p>Hi %s,</p><p>Approval request <strong>#%d</strong> is waiting for your decision.</p><p>It expires at %s.</p>", toName, requestID, expiresAt.Format(time.RFC3339))
+	return s.queueEmail(&EmailMessage{To: toEmail, ToName: toName, Subject: subject, PlainText: plain, HTML: html})
 }
 
 type emailService struct {
-	provider           EmailProvider
-	fromAddress        string
-	fromName           string
-	verificationURL    string
-	sendGridAPIKey     string
-	sesRegion          string
-	sesSMTPUsername    string
-	sesSMTPPassword    string
-	queue              chan *EmailMessage
+	provider        EmailProvider
+	fromAddress     string
+	fromName        string
+	verificationURL string
+	sendGridAPIKey  string
+	sesRegion       string
+	sesSMTPUsername string
+	sesSMTPPassword string
+	queue           chan *EmailMessage
 }
 
 type EmailMessage struct {
@@ -134,7 +142,7 @@ func (s *emailService) sendViaSendGrid(msg *EmailMessage) error {
 	payload := map[string]interface{}{
 		"personalizations": []map[string]interface{}{
 			{
-				"to": []map[string]string{{"email": msg.To, "name": msg.ToName}},
+				"to":      []map[string]string{{"email": msg.To, "name": msg.ToName}},
 				"subject": msg.Subject,
 			},
 		},

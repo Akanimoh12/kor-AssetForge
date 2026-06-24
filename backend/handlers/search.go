@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"fmt"
 	"net/http"
 	"strconv"
 	"time"
@@ -12,7 +13,7 @@ import (
 
 // SearchHandler provides asset search and suggestion endpoints.
 type SearchHandler struct {
-	backend  services.SearchBackend
+	backend   services.SearchBackend
 	analytics []services.SearchAnalyticsEvent // in-memory ring; replace with DB or queue in production
 }
 
@@ -32,6 +33,10 @@ func NewSearchHandler(backend services.SearchBackend) *SearchHandler {
 // @Param asset_type query string false "Filter by asset type"
 // @Param min_price query float64 false "Minimum price"
 // @Param max_price query float64 false "Maximum price"
+// @Param location query string false "Filter by location (repeatable)"
+// @Param created_from query string false "Assets created on or after YYYY-MM-DD"
+// @Param created_to query string false "Assets created on or before YYYY-MM-DD"
+// @Param metadata.{field} query string false "Exact custom metadata match"
 // @Param verified query boolean false "Filter by verified status"
 // @Param sort_by query string false "Sort field"
 // @Param order query string false "Sort order"
@@ -44,6 +49,16 @@ func NewSearchHandler(backend services.SearchBackend) *SearchHandler {
 func (sh *SearchHandler) Search(c *gin.Context) {
 	var req services.SearchRequest
 	if err := c.ShouldBindQuery(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	req.Metadata = map[string]string{}
+	for key, values := range c.Request.URL.Query() {
+		if len(values) > 0 && len(key) > len("metadata.") && key[:len("metadata.")] == "metadata." {
+			req.Metadata[key[len("metadata."):]] = values[len(values)-1]
+		}
+	}
+	if err := req.Validate(); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
@@ -116,8 +131,8 @@ func (sh *SearchHandler) SearchAnalytics(c *gin.Context) {
 
 func (sh *SearchHandler) recordAnalytics(req services.SearchRequest, count int64, tookMs float64) {
 	filters := map[string]interface{}{}
-	if req.AssetType != "" {
-		filters["asset_type"] = req.AssetType
+	if req.AssetType != "" || len(req.AssetTypes) > 0 {
+		filters["asset_type"] = fmt.Sprint(req.AssetTypes)
 	}
 	if req.Verified != nil {
 		filters["verified"] = *req.Verified
@@ -127,6 +142,18 @@ func (sh *SearchHandler) recordAnalytics(req services.SearchRequest, count int64
 	}
 	if req.MaxPrice != nil {
 		filters["max_price"] = *req.MaxPrice
+	}
+	if len(req.Locations) > 0 || req.Location != "" {
+		filters["location"] = fmt.Sprint(req.Locations)
+	}
+	if req.CreatedFrom != nil {
+		filters["created_from"] = req.CreatedFrom.Format(time.RFC3339)
+	}
+	if req.CreatedTo != nil {
+		filters["created_to"] = req.CreatedTo.Format(time.RFC3339)
+	}
+	if len(req.Metadata) > 0 {
+		filters["metadata"] = req.Metadata
 	}
 
 	evt := services.SearchAnalyticsEvent{

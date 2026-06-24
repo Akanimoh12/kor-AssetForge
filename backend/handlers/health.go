@@ -56,11 +56,16 @@ func (h *HealthHandler) ReadinessCheck(c *gin.Context) {
 	if err != nil {
 		checks["database"] = "DOWN: " + err.Error()
 		isReady = false
-	} else if err := sqlDB.Ping(); err != nil {
-		checks["database"] = "DOWN: " + err.Error()
-		isReady = false
 	} else {
-		checks["database"] = "UP"
+		ctx, cancel := context.WithTimeout(c.Request.Context(), 3*time.Second)
+		err := sqlDB.PingContext(ctx)
+		cancel()
+		if err != nil {
+			checks["database"] = "DOWN: " + err.Error()
+			isReady = false
+		} else {
+			checks["database"] = "UP"
+		}
 	}
 
 	// Check Redis
