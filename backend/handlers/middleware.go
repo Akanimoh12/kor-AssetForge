@@ -36,8 +36,10 @@ func RequestLogger() gin.HandlerFunc {
 
 		// Log request details
 		duration := time.Since(start)
+		traceID, _ := c.Get("trace_id")
 		Logger.Info("HTTP Request",
 			zap.String("request_id", requestID),
+			zap.Any("trace_id", traceID),
 			zap.String("method", c.Request.Method),
 			zap.String("path", c.Request.URL.Path),
 			zap.Int("status", c.Writer.Status()),
@@ -55,9 +57,11 @@ func GlobalErrorHandler() gin.HandlerFunc {
 			if err := recover(); err != nil {
 				// Log the panic with stack trace
 				requestID, _ := c.Get("request_id")
+				traceID, _ := c.Get("trace_id")
 				Logger.Error("Panic recovered",
 					zap.Any("error", err),
 					zap.Any("request_id", requestID),
+					zap.Any("trace_id", traceID),
 					zap.String("stack", string(debug.Stack())),
 				)
 
@@ -66,6 +70,7 @@ func GlobalErrorHandler() gin.HandlerFunc {
 					"error":      "Internal Server Error",
 					"message":    fmt.Sprintf("%v", err),
 					"request_id": requestID,
+					"trace_id":   traceID,
 					"code":       500,
 				})
 				c.Abort()
@@ -77,13 +82,15 @@ func GlobalErrorHandler() gin.HandlerFunc {
 		// Check if there are errors in the context
 		if len(c.Errors) > 0 {
 			requestID, _ := c.Get("request_id")
+			traceID, _ := c.Get("trace_id")
 			err := c.Errors.Last()
-			
+
 			// Standardized JSON error response
 			c.JSON(c.Writer.Status(), gin.H{
 				"error":      "Processing Error",
 				"message":    err.Error(),
 				"request_id": requestID,
+				"trace_id":   traceID,
 				"code":       c.Writer.Status(),
 			})
 		}
