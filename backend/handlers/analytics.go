@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/yourusername/kor-assetforge/models"
 	"github.com/yourusername/kor-assetforge/services"
 	"gorm.io/gorm"
 )
@@ -198,4 +197,3 @@ func (h *AnalyticsHandler) GetLatestValuation(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{"success": true, "data": v})
 }
-

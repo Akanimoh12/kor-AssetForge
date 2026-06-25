@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/yourusername/kor-assetforge/models"
 	"github.com/elastic/go-elasticsearch/v8"
+	"github.com/yourusername/kor-assetforge/models"
 	"gorm.io/gorm"
 )
 
@@ -49,8 +49,8 @@ func (i *ElasticsearchIndexer) IndexAssetsBulk(ctx context.Context, assets []*mo
 	}
 
 	res, err := i.client.Bulk(
+		strings.NewReader(bulkRequest.String()),
 		i.client.Bulk.WithContext(ctx),
-		i.client.Bulk.WithBody(strings.NewReader(bulkRequest.String())),
 	)
 
 	if err != nil || res.IsError() {
@@ -112,7 +112,7 @@ func (i *ElasticsearchIndexer) createIndex(ctx context.Context) error {
 		},
 		"mappings": map[string]interface{}{
 			"properties": map[string]interface{}{
-				"id":             map[string]interface{}{"type": "keyword"},
+				"id": map[string]interface{}{"type": "keyword"},
 				"name": map[string]interface{}{
 					"type":     "text",
 					"analyzer": "asset_analyzer",
@@ -121,20 +121,20 @@ func (i *ElasticsearchIndexer) createIndex(ctx context.Context) error {
 						"completion": map[string]interface{}{"type": "completion"},
 					},
 				},
-				"symbol":           map[string]interface{}{"type": "keyword"},
-				"description":      map[string]interface{}{"type": "text", "analyzer": "asset_analyzer"},
-				"asset_type":       map[string]interface{}{"type": "keyword"},
-				"total_supply":     map[string]interface{}{"type": "long"},
-				"fractions":        map[string]interface{}{"type": "long"},
-				"contract_id":      map[string]interface{}{"type": "keyword"},
-				"owner_address":    map[string]interface{}{"type": "keyword"},
-				"metadata":         map[string]interface{}{"type": "object", "enabled": false},
-				"image_url":        map[string]interface{}{"type": "keyword"},
-				"document_url":     map[string]interface{}{"type": "keyword"},
-				"verified":         map[string]interface{}{"type": "boolean"},
-				"created_at":       map[string]interface{}{"type": "date"},
-				"updated_at":       map[string]interface{}{"type": "date"},
-				"search_text":      map[string]interface{}{"type": "text", "analyzer": "asset_analyzer"},
+				"symbol":        map[string]interface{}{"type": "keyword"},
+				"description":   map[string]interface{}{"type": "text", "analyzer": "asset_analyzer"},
+				"asset_type":    map[string]interface{}{"type": "keyword"},
+				"total_supply":  map[string]interface{}{"type": "long"},
+				"fractions":     map[string]interface{}{"type": "long"},
+				"contract_id":   map[string]interface{}{"type": "keyword"},
+				"owner_address": map[string]interface{}{"type": "keyword"},
+				"metadata":      map[string]interface{}{"type": "object", "enabled": false},
+				"image_url":     map[string]interface{}{"type": "keyword"},
+				"document_url":  map[string]interface{}{"type": "keyword"},
+				"verified":      map[string]interface{}{"type": "boolean"},
+				"created_at":    map[string]interface{}{"type": "date"},
+				"updated_at":    map[string]interface{}{"type": "date"},
+				"search_text":   map[string]interface{}{"type": "text", "analyzer": "asset_analyzer"},
 			},
 		},
 	}

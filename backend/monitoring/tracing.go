@@ -3,20 +3,17 @@ package monitoring
 import (
 	"context"
 	"log"
+	"strings"
 
-	"go.opentelemetry.io/exporter/otlp/otlptrace"
-	"go.opentelemetry.io/exporter/otlp/otlptrace/otlptracehttp"
-	"go.opentelemetry.io/sdk/resource"
-	sdktrace "go.opentelemetry.io/sdk/trace"
-	semconv "go.opentelemetry.io/semconv/v1.17.0"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/sdk/resource"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	semconv "go.opentelemetry.io/otel/semconv/v1.17.0"
 )
 
 func InitializeTracing(ctx context.Context, serviceName, collectorURL string) (*sdktrace.TracerProvider, error) {
-	exporter, err := otlptracehttp.New(ctx, otlptracehttp.WithEndpoint(collectorURL))
-	if err != nil {
-		return nil, err
-	}
-
 	res, err := resource.New(ctx,
 		resource.WithAttributes(
 			semconv.ServiceNameKey.String(serviceName),
@@ -26,10 +23,27 @@ func InitializeTracing(ctx context.Context, serviceName, collectorURL string) (*
 		return nil, err
 	}
 
-	tp := sdktrace.NewTracerProvider(
-		sdktrace.WithBatcher(exporter),
+	options := []sdktrace.TracerProviderOption{
 		sdktrace.WithResource(res),
-	)
+		sdktrace.WithSampler(sdktrace.TraceIDRatioBased(0.10)),
+	}
+	if strings.TrimSpace(collectorURL) != "" {
+		exporter, err := otlptracehttp.New(ctx,
+			otlptracehttp.WithEndpoint(strings.TrimPrefix(collectorURL, "http://")),
+			otlptracehttp.WithInsecure(),
+		)
+		if err != nil {
+			return nil, err
+		}
+		options = append(options, sdktrace.WithBatcher(exporter))
+	}
+
+	tp := sdktrace.NewTracerProvider(options...)
+	otel.SetTracerProvider(tp)
+	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(
+		propagation.TraceContext{},
+		propagation.Baggage{},
+	))
 
 	return tp, nil
 }

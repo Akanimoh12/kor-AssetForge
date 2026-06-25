@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"time"
 
-	"gorm.io/gorm"
 	"github.com/yourusername/kor-assetforge/models"
+	"gorm.io/gorm"
 )
 
 type FeeService struct {
@@ -68,17 +68,10 @@ func (fs *FeeService) CalculateFee(assetType string, amount int64) (int64, error
 	discountBps := int64(0)
 
 	for _, tier := range config.DiscountTiers {
-		min := int64(0)
-		max := int64(^uint64(0) >> 1)
+		min := tier.MinVolumeStroops
+		max := tier.MaxVolumeStroops
 
-		if err := tier.MinVolumeStroops.Unmarshal(&min); err != nil {
-			min = 0
-		}
-		if err := tier.MaxVolumeStroops.Unmarshal(&max); err != nil {
-			max = int64(^uint64(0) >> 1)
-		}
-
-		if amount >= min && (tier.MaxVolumeStroops == nil || amount <= max) {
+		if amount >= min && (max <= 0 || amount <= max) {
 			discountBps = int64(tier.DiscountBps)
 			break
 		}

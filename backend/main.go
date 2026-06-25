@@ -111,6 +111,16 @@ func main() {
 		BcryptCost:         getEnvIntOrDefault("BCRYPT_COST", 12),
 	}
 	emailService := services.NewEmailServiceFromEnv()
+	reportScheduler := services.NewReportSchedulerService(db, emailService)
+	if err := reportScheduler.Start(context.Background()); err != nil {
+		log.Printf("Warning: report scheduler failed to start: %v", err)
+	}
+	tracerProvider, err := monitoring.InitializeTracing(context.Background(), "kor-assetforge-api", os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"))
+	if err != nil {
+		log.Printf("Warning: tracing disabled: %v", err)
+	} else {
+		defer monitoring.ShutdownTracing(context.Background(), tracerProvider)
+	}
 	authHandler := auth.NewAuthHandler(db, authConfig, emailService)
 	authMiddleware := auth.NewAuthMiddleware(authConfig.JWTSecret)
 	authRateLimiter := auth.NewAuthRateLimiter(rate.Limit(5.0/60.0), 10)
@@ -124,6 +134,8 @@ func main() {
 
 	// Use custom enhanced middleware
 	router.Use(
+		middleware.VersionNegotiation(),
+		middleware.TracingMiddleware("kor-assetforge-api"),
 		handlers.RequestLogger(),
 		middleware.DetectLanguage(), // resolve request language for i18n (#185)
 		handlers.GlobalErrorHandler(),
@@ -152,6 +164,7 @@ func main() {
 
 	// Swagger documentation
 	router.GET("/swagger/*any", ginSwagger.WrapHandler(swaggerFiles.Handler))
+	router.GET("/api/version/migration-guide", middleware.MigrationGuide)
 
 	// Cache metrics
 	router.GET("/metrics/cache", middleware.CacheMetricsHandler(cacheManager))
@@ -456,6 +469,19 @@ func main() {
 			dashboardGroup.GET("/export", dashboardHandler.ExportReport)
 			dashboardGroup.POST("/activity", dashboardHandler.RecordActivity)
 		}
+
+		// Scheduled report generation and delivery routes (#173)
+		reportHandler := handlers.NewReportHandler(reportScheduler)
+		reportGroup := protected.Group("/reports")
+		{
+			reportGroup.GET("/schedules", reportHandler.ListSchedules)
+			reportGroup.POST("/schedules", reportHandler.CreateSchedule)
+			reportGroup.GET("/schedules/:id", reportHandler.GetSchedule)
+			reportGroup.PUT("/schedules/:id", reportHandler.UpdateSchedule)
+			reportGroup.DELETE("/schedules/:id", reportHandler.DeleteSchedule)
+			reportGroup.POST("/schedules/:id/run", reportHandler.RunSchedule)
+			reportGroup.GET("/history", reportHandler.ListHistory)
+		}
 	}
 
 	// API v2 routes (#124)
@@ -464,6 +490,37 @@ func main() {
 		v2AssetsHandler := handlersv2.NewAssetsHandler(db)
 		v2.GET("/assets", v2AssetsHandler.ListAssets)
 		v2.GET("/assets/:id", v2AssetsHandler.GetAsset)
+		v2.GET("/health", healthHandler.ReadinessCheck)
+
+		v2Protected := v2.Group("")
+		v2Protected.Use(authMiddleware.JWTAuth())
+		{
+			v2Protected.GET("/profile", authHandler.GetProfile)
+			v2Protected.POST("/logout", authHandler.Logout)
+
+			v2ReportHandler := handlers.NewReportHandler(reportScheduler)
+			v2Reports := v2Protected.Group("/reports")
+			{
+				v2Reports.GET("/schedules", v2ReportHandler.ListSchedules)
+				v2Reports.POST("/schedules", v2ReportHandler.CreateSchedule)
+				v2Reports.GET("/schedules/:id", v2ReportHandler.GetSchedule)
+				v2Reports.PUT("/schedules/:id", v2ReportHandler.UpdateSchedule)
+				v2Reports.DELETE("/schedules/:id", v2ReportHandler.DeleteSchedule)
+				v2Reports.POST("/schedules/:id/run", v2ReportHandler.RunSchedule)
+				v2Reports.GET("/history", v2ReportHandler.ListHistory)
+			}
+
+			v2NotificationHandler := handlers.NewNotificationHandler(db)
+			v2Notifications := v2Protected.Group("/notifications")
+			{
+				v2Notifications.GET("", v2NotificationHandler.ListNotifications)
+				v2Notifications.GET("/unread-count", v2NotificationHandler.UnreadCount)
+				v2Notifications.PUT("/read-all", v2NotificationHandler.MarkAllRead)
+				v2Notifications.PUT("/:id/read", v2NotificationHandler.MarkRead)
+				v2Notifications.GET("/preferences", v2NotificationHandler.GetPreferences)
+				v2Notifications.PUT("/preferences", v2NotificationHandler.UpdatePreference)
+			}
+		}
 	}
 
 	// WebSocket routes (#54) — outside v1 group so the CSRF/JSON middleware
