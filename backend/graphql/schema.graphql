@@ -1,20 +1,40 @@
 """
 AssetForge GraphQL Schema
-Provides a flexible query interface alongside the REST API.
+Cursor-based pagination follows the Relay Connection spec.
 """
 
 type Query {
   """Fetch a single asset by ID."""
   asset(id: ID!): Asset
 
-  """List assets with optional filters."""
-  assets(limit: Int = 20, offset: Int = 0, status: String): [Asset!]!
+  """List assets with cursor-based pagination (max 100 per page)."""
+  assets(first: Int, after: String, last: Int, before: String, status: String): AssetConnection!
 
   """Fetch a user's public profile."""
   userProfile(id: ID!): UserProfile
 
   """Platform analytics summary."""
   analyticsSummary: AnalyticsSummary
+}
+
+"""Relay-style connection for Asset pagination."""
+type AssetConnection {
+  edges: [AssetEdge!]!
+  pageInfo: PageInfo!
+  totalCount: Int!
+}
+
+type AssetEdge {
+  node: Asset!
+  cursor: String!
+}
+
+"""Cursor-based page info."""
+type PageInfo {
+  hasNextPage: Boolean!
+  hasPreviousPage: Boolean!
+  startCursor: String
+  endCursor: String
 }
 
 type Asset {
