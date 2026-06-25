@@ -35,6 +35,7 @@ type EmailService interface {
 	SendKYCStatusUpdate(toEmail, toName, status, reviewNotes string) error
 	SendTransactionConfirmation(toEmail, toName, txHash string, amount int64, assetID uint, fromAddress, toAddress string) error
 	SendApprovalPendingEmail(toEmail, toName string, requestID uint, expiresAt time.Time) error
+	SendScheduledReportEmail(recipients []string, reportName, format, fileName, body string) error
 }
 
 func (s *emailService) SendApprovalPendingEmail(toEmail, toName string, requestID uint, expiresAt time.Time) error {
@@ -228,4 +229,19 @@ func (s *emailService) SendTransactionConfirmation(toEmail, toName, txHash strin
 	plain := fmt.Sprintf("Hi %s,\n\nYour transaction has been recorded successfully.\n\nTransaction hash: %s\nAsset ID: %d\nAmount: %d\nFrom: %s\nTo: %s\n\nThank you for using AssetForge.\n", toName, txHash, assetID, amount, fromAddress, toAddress)
 	html := fmt.Sprintf("<p>Hi %s,</p><p>Your transaction has been recorded successfully.</p><ul><li><strong>Transaction hash:</strong> %s</li><li><strong>Asset ID:</strong> %d</li><li><strong>Amount:</strong> %d</li><li><strong>From:</strong> %s</li><li><strong>To:</strong> %s</li></ul><p>Thank you for using AssetForge.</p>", toName, txHash, assetID, amount, fromAddress, toAddress)
 	return s.queueEmail(&EmailMessage{To: toEmail, ToName: toName, Subject: subject, PlainText: plain, HTML: html})
+}
+
+func (s *emailService) SendScheduledReportEmail(recipients []string, reportName, format, fileName, body string) error {
+	if len(recipients) == 0 {
+		return errors.New("at least one recipient is required")
+	}
+	subject := fmt.Sprintf("Scheduled report ready: %s", reportName)
+	plain := fmt.Sprintf("Your scheduled %s report is ready.\n\nFile: %s\nFormat: %s\n\n%s\n", reportName, fileName, strings.ToUpper(format), body)
+	html := fmt.Sprintf("<p>Your scheduled <strong>%s</strong> report is ready.</p><p><strong>File:</strong> %s<br><strong>Format:</strong> %s</p><pre style=\"white-space:pre-wrap\">%s</pre>", reportName, fileName, strings.ToUpper(format), body)
+	for _, recipient := range recipients {
+		if err := s.queueEmail(&EmailMessage{To: recipient, Subject: subject, PlainText: plain, HTML: html}); err != nil {
+			return err
+		}
+	}
+	return nil
 }

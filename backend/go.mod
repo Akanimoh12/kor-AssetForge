@@ -20,6 +20,7 @@ require (
 	github.com/joho/godotenv v1.5.1
 	github.com/prometheus/client_golang v1.17.0
 	github.com/redis/go-redis/v9 v9.5.1
+	github.com/robfig/cron/v3 v3.0.1
 	github.com/stellar/go v0.0.0-20251210100531-aab2ea4aca88
 	github.com/ulule/limiter/v3 v3.11.2
 	go.uber.org/zap v1.26.0

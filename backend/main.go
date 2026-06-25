@@ -111,6 +111,10 @@ func main() {
 		BcryptCost:         getEnvIntOrDefault("BCRYPT_COST", 12),
 	}
 	emailService := services.NewEmailServiceFromEnv()
+	reportScheduler := services.NewReportSchedulerService(db, emailService)
+	if err := reportScheduler.Start(context.Background()); err != nil {
+		log.Printf("Warning: report scheduler failed to start: %v", err)
+	}
 	authHandler := auth.NewAuthHandler(db, authConfig, emailService)
 	authMiddleware := auth.NewAuthMiddleware(authConfig.JWTSecret)
 	authRateLimiter := auth.NewAuthRateLimiter(rate.Limit(5.0/60.0), 10)
@@ -423,6 +427,19 @@ func main() {
 			dashboardGroup.GET("/activity", dashboardHandler.GetActivityTimeline)
 			dashboardGroup.GET("/export", dashboardHandler.ExportReport)
 			dashboardGroup.POST("/activity", dashboardHandler.RecordActivity)
+		}
+
+		// Scheduled report generation and delivery routes (#173)
+		reportHandler := handlers.NewReportHandler(reportScheduler)
+		reportGroup := protected.Group("/reports")
+		{
+			reportGroup.GET("/schedules", reportHandler.ListSchedules)
+			reportGroup.POST("/schedules", reportHandler.CreateSchedule)
+			reportGroup.GET("/schedules/:id", reportHandler.GetSchedule)
+			reportGroup.PUT("/schedules/:id", reportHandler.UpdateSchedule)
+			reportGroup.DELETE("/schedules/:id", reportHandler.DeleteSchedule)
+			reportGroup.POST("/schedules/:id/run", reportHandler.RunSchedule)
+			reportGroup.GET("/history", reportHandler.ListHistory)
 		}
 	}
 

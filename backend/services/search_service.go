@@ -388,7 +388,7 @@ func NewESSearchBackend(esBaseURL string, db *gorm.DB) (SearchBackend, error) {
 	}
 
 	// Verify ES connection
-	res, err := client.Info(context.Background())
+	res, err := client.Info(client.Info.WithContext(context.Background()))
 	if err != nil || res.IsError() {
 		// Fall back to DB if ES is down
 		return &ESSearchBackend{
@@ -666,9 +666,9 @@ func (es *ESSearchBackend) IndexAsset(ctx context.Context, asset *models.Asset) 
 
 	res, err := es.client.Index(
 		es.indexName,
+		strings.NewReader(string(body)),
 		es.client.Index.WithContext(ctx),
 		es.client.Index.WithDocumentID(docID),
-		es.client.Index.WithBody(strings.NewReader(string(body))),
 	)
 
 	if err != nil || res.IsError() {
@@ -723,8 +723,8 @@ func (es *ESSearchBackend) RecordAnalytics(ctx context.Context, event *SearchAna
 
 	res, err := es.client.Index(
 		analyticsIndex,
+		strings.NewReader(string(body)),
 		es.client.Index.WithContext(ctx),
-		es.client.Index.WithBody(strings.NewReader(string(body))),
 	)
 
 	if err != nil || res.IsError() {

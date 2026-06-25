@@ -2,12 +2,13 @@ package handlers
 
 import (
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"gorm.io/gorm"
 	"github.com/yourusername/kor-assetforge/models"
 	"github.com/yourusername/kor-assetforge/services"
+	"gorm.io/gorm"
 )
 
 type FeeHandler struct {
@@ -40,12 +41,12 @@ type CalculateFeeRequest struct {
 }
 
 type CalculateFeeResponse struct {
-	Amount              int64  `json:"amount"`
-	FeeStroops          int64  `json:"fee_stroops"`
-	AssetType           string `json:"asset_type"`
-	BaseFeeBps          int16  `json:"base_fee_bps"`
-	AppliedDiscountBps  int16  `json:"applied_discount_bps"`
-	NetFeeBps           int16  `json:"net_fee_bps"`
+	Amount             int64  `json:"amount"`
+	FeeStroops         int64  `json:"fee_stroops"`
+	AssetType          string `json:"asset_type"`
+	BaseFeeBps         int16  `json:"base_fee_bps"`
+	AppliedDiscountBps int16  `json:"applied_discount_bps"`
+	NetFeeBps          int16  `json:"net_fee_bps"`
 }
 
 func (fh *FeeHandler) CreateFeeConfiguration(c *gin.Context) {
@@ -72,6 +73,11 @@ func (fh *FeeHandler) CreateFeeConfiguration(c *gin.Context) {
 
 func (fh *FeeHandler) UpdateFeeConfiguration(c *gin.Context) {
 	id := c.Param("id")
+	configID, err := strconv.ParseUint(id, 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid fee configuration id"})
+		return
+	}
 
 	var req CreateFeeConfigRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -84,13 +90,7 @@ func (fh *FeeHandler) UpdateFeeConfiguration(c *gin.Context) {
 		Description: req.Description,
 	}
 
-	var configID uint
-	_, err := c.Cookie("id")
-	if err == nil {
-		_, _ = c.Cookie("id")
-	}
-
-	if err := fh.feeService.UpdateFeeConfiguration(configID, config); err != nil {
+	if err := fh.feeService.UpdateFeeConfiguration(uint(configID), config); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
@@ -132,9 +132,9 @@ func (fh *FeeHandler) AddDiscountTier(c *gin.Context) {
 	}
 
 	tier := &models.FeeDiscountTier{
-		FeeConfigID:      req.FeeConfigID,
-		TierName:         req.TierName,
-		DiscountBps:      req.DiscountBps,
+		FeeConfigID: req.FeeConfigID,
+		TierName:    req.TierName,
+		DiscountBps: req.DiscountBps,
 	}
 
 	if err := fh.feeService.AddDiscountTier(tier); err != nil {
@@ -225,7 +225,9 @@ func (fh *FeeHandler) GenerateFeeReport(c *gin.Context) {
 func (fh *FeeHandler) GetFeeReports(c *gin.Context) {
 	limit := 10
 	if limitStr := c.Query("limit"); limitStr != "" {
-		_, _ = c.Query("limit")
+		if parsed, err := strconv.Atoi(limitStr); err == nil && parsed > 0 {
+			limit = parsed
+		}
 	}
 
 	reports, err := fh.feeService.GetFeeReports(limit)
